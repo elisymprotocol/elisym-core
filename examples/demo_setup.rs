@@ -52,8 +52,8 @@ async fn main() -> Result<()> {
 
     // ── Step 2: Sync and show balances ──
     let step = Instant::now();
-    println!("  [{}] [Step 2/4] Syncing with blockchain (10s)...", ts());
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    println!("  [{}] [Step 2/4] Syncing with blockchain (30s)...", ts());
+    tokio::time::sleep(Duration::from_secs(30)).await;
 
     let provider_balance = provider_payments.onchain_balance().unwrap_or(0);
     let customer_balance = customer_payments.onchain_balance().unwrap_or(0);
