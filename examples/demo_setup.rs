@@ -1,9 +1,12 @@
 //! Demo Setup — opens a Lightning channel between customer and provider.
 //!
+//! This is a one-time operation. Once the channel is open, all subsequent
+//! Lightning payments between customer and provider are instant.
+//!
 //! Run this once before the demo to ensure the customer has outbound liquidity:
 //!   cargo run --example demo_setup
 //!
-//! After the channel is usable (~15-20 min on testnet), run:
+//! After the channel is usable (~60 min for ~6 confirmations), run:
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example demo_provider
 //!   cargo run --example demo_customer
 
@@ -162,12 +165,13 @@ async fn main() -> Result<()> {
     // ── Step 4: Wait for channel to become usable ──
     let step = Instant::now();
     println!("  [{}] [Step 4/4] Waiting for channel confirmations...", ts());
-    println!("             This takes ~15-20 min on testnet.");
-    println!("             Checking every 30s (up to 40 iterations)...");
+    println!("             The funding tx needs ~6 confirmations (~60 min).");
+    println!("             This is a one-time setup — once open, payments are instant.");
+    println!("             Checking every 30s (up to 80 iterations)...");
     println!();
 
     let mut ready = false;
-    for i in 1..=40 {
+    for i in 1..=80 {
         tokio::time::sleep(Duration::from_secs(30)).await;
 
         let chs = customer_payments.list_channels().unwrap_or_default();
@@ -187,7 +191,7 @@ async fn main() -> Result<()> {
             "waiting for confirmations...".to_string()
         };
 
-        println!("             [{:>2}/40] Channel status: {} ({})", i, status, fmt_duration(step.elapsed()));
+        println!("             [{:>2}/80] Channel status: {} ({})", i, status, fmt_duration(step.elapsed()));
         if i == 1 {
             if let Some(txid) = &funding_info {
                 println!("             Funding tx: https://mempool.space/testnet/tx/{}", txid);
