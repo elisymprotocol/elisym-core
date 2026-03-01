@@ -1,0 +1,139 @@
+use nostr_sdk::prelude::*;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::error::{ElisymError, Result};
+use crate::types::PROTOCOL_VERSION;
+
+/// Wrapper around nostr_sdk::Keys providing agent identity management.
+#[derive(Debug, Clone)]
+pub struct AgentIdentity {
+    keys: Keys,
+}
+
+impl AgentIdentity {
+    /// Generate a new random identity.
+    pub fn generate() -> Self {
+        Self {
+            keys: Keys::generate(),
+        }
+    }
+
+    /// Create identity from a hex-encoded secret key.
+    pub fn from_secret_key(hex: &str) -> Result<Self> {
+        let secret_key = SecretKey::parse(hex)?;
+        Ok(Self {
+            keys: Keys::new(secret_key),
+        })
+    }
+
+    /// Create identity from an nsec bech32 string.
+    ///
+    /// This is an alias for [`from_secret_key`](Self::from_secret_key) since
+    /// `SecretKey::parse` accepts both hex and nsec formats.
+    pub fn from_nsec(nsec: &str) -> Result<Self> {
+        Self::from_secret_key(nsec)
+    }
+
+    /// Get the public key.
+    pub fn public_key(&self) -> PublicKey {
+        self.keys.public_key()
+    }
+
+    /// Get the npub bech32 representation.
+    pub fn npub(&self) -> String {
+        self.keys.public_key().to_bech32().unwrap_or_default()
+    }
+
+    /// Get a reference to the underlying Keys.
+    pub fn keys(&self) -> &Keys {
+        &self.keys
+    }
+}
+
+/// Describes an agent's capabilities, published as NIP-89 event content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityCard {
+    pub name: String,
+    pub description: String,
+    pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lightning_address: Option<String>,
+    pub protocol_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
+
+impl CapabilityCard {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        capabilities: Vec<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            capabilities,
+            lightning_address: None,
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            metadata: None,
+        }
+    }
+
+    pub fn set_lightning_address(&mut self, address: impl Into<String>) {
+        self.lightning_address = Some(address.into());
+    }
+
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string(self).map_err(ElisymError::from)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self> {
+        let card: Self = serde_json::from_str(json)?;
+        if card.name.is_empty() {
+            return Err(ElisymError::InvalidCapabilityCard(
+                "name is required".into(),
+            ));
+        }
+        Ok(card)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_identity_generate() {
+        let id = AgentIdentity::generate();
+        assert!(!id.npub().is_empty());
+    }
+
+    #[test]
+    fn test_identity_roundtrip() {
+        let id = AgentIdentity::generate();
+        let hex = id.keys().secret_key().to_secret_hex();
+        let restored = AgentIdentity::from_secret_key(&hex).unwrap();
+        assert_eq!(id.public_key(), restored.public_key());
+    }
+
+    #[test]
+    fn test_capability_card_serde() {
+        let mut card = CapabilityCard::new("test-agent", "A test agent", vec!["translation".into()]);
+        card.set_lightning_address("agent@wallet.com");
+
+        let json = card.to_json().unwrap();
+        let parsed = CapabilityCard::from_json(&json).unwrap();
+
+        assert_eq!(parsed.name, "test-agent");
+        assert_eq!(parsed.capabilities, vec!["translation"]);
+        assert_eq!(parsed.lightning_address.as_deref(), Some("agent@wallet.com"));
+        assert_eq!(parsed.protocol_version, PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn test_capability_card_empty_name_fails() {
+        let json = r#"{"name":"","description":"x","capabilities":[],"protocol_version":"elisym/0.1"}"#;
+        assert!(CapabilityCard::from_json(json).is_err());
+    }
+}

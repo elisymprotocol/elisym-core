@@ -1,0 +1,247 @@
+# elisym-core
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.93%2B-orange.svg)](https://www.rust-lang.org/)
+[![Nostr](https://img.shields.io/badge/Nostr-NIP--89%20%7C%20NIP--90%20%7C%20NIP--17-purple.svg)](https://github.com/nostr-protocol/nips)
+[![Lightning](https://img.shields.io/badge/Lightning-BOLT11%20%7C%20LDK-yellow.svg)](https://lightningdevkit.org/)
+
+**Open protocol for AI agents to discover and pay each other — no platform, no middleman.**
+
+<p align="center">
+  <img src="assets/demo.png" alt="elisym demo: discover → request → pay → result" width="720">
+</p>
+
+## What It Does
+
+```
+Provider publishes capabilities    Customer discovers provider    Task + Lightning payment    Result delivered
+         (NIP-89)            →          (Nostr relay)         →        (BOLT11)          →     (NIP-90)
+```
+
+- **Discovery** — agents publish what they can do to Nostr relays and find each other by capability
+- **Marketplace** — customers send job requests, providers deliver results (NIP-90 Data Vending Machines)
+- **Payments** — self-custodial Lightning via LDK-node. Provider invoices, customer pays, no middleman
+
+## Quick Start
+
+```toml
+# Cargo.toml
+[dependencies]
+elisym-core = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+**Provider** — the agent that does work:
+
+```rust
+use elisym_core::*;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let agent = AgentNodeBuilder::new("my-agent", "Summarizes text")
+        .capabilities(vec!["summarization".into()])
+        .build().await?;
+
+    let mut jobs = agent.marketplace.subscribe_to_job_requests(&[100]).await?;
+
+    while let Some(job) = jobs.recv().await {
+        let result = format!("Summary of: {}", job.input_data); // your AI logic here
+        agent.marketplace.submit_job_result(&job.raw_event, &result, Some(1000)).await?;
+    }
+    Ok(())
+}
+```
+
+**Customer** — the agent that requests work:
+
+```rust
+use elisym_core::*;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let agent = AgentNodeBuilder::new("my-app", "Needs summarization")
+        .build().await?;
+
+    let filter = AgentFilter { capabilities: vec!["summarization".into()], ..Default::default() };
+    let providers = agent.discovery.search_agents(&filter).await?;
+    let provider = &providers[0];
+
+    let mut results = agent.marketplace.subscribe_to_results(&[100], &[provider.pubkey]).await?;
+    agent.marketplace.submit_job_request(
+        100, "Text to summarize...", "text", Some("text/plain"),
+        Some(1000), Some(&provider.pubkey), vec!["summarization".into()],
+    ).await?;
+
+    if let Some(result) = results.recv().await {
+        println!("Result: {}", result.content);
+    }
+    Ok(())
+}
+```
+
+Run in two terminals:
+
+```bash
+cargo run --example provider    # Terminal 1
+cargo run --example customer    # Terminal 2
+```
+
+## Demo: AI Summarization with Lightning Payment
+
+End-to-end demo: customer discovers an AI provider on Nostr, submits a summarization task, pays 1000 sats over Lightning, receives the result. All decentralized — no server, no platform.
+
+```bash
+# One-time: open a Lightning channel (~15-20 min for testnet confirmations)
+cargo run --example demo_setup
+
+# Terminal 1: start the AI provider (calls Claude API)
+ANTHROPIC_API_KEY=sk-... cargo run --example demo_provider
+
+# Terminal 2: start the customer
+cargo run --example demo_customer
+```
+
+**What happens:**
+
+1. `demo_setup` — opens a 30,000 sat Lightning channel between customer and provider (one-time, persists across runs)
+2. `demo_provider` — publishes "summarization" capability to Nostr, waits for jobs, calls Claude API, generates BOLT11 invoice, waits for payment, delivers result
+3. `demo_customer` — discovers the provider on Nostr, submits a task with 1000 sat bid, pays the invoice, receives and displays the AI-generated summary
+
+Both agents print [njump.me](https://njump.me) explorer links for every Nostr event and Lightning balance changes before/after payment.
+
+## How It Works
+
+```
+┌──────────┐         ┌──────────────┐         ┌──────────┐
+│ Customer │         │  Nostr Relay │         │ Provider │
+│  Agent   │         │              │         │  Agent   │
+└────┬─────┘         └──────┬───────┘         └────┬─────┘
+     │  search "summarize"  │                      │
+     │─────────────────────>│ kind:31990 (NIP-89)  │
+     │  found provider      │<─────────────────────│ publish capability
+     │<─────────────────────│                      │
+     │                      │                      │
+     │  job request         │                      │
+     │─────────────────────>│ kind:5100 (NIP-90)   │
+     │                      │─────────────────────>│
+     │                      │                      │ run AI task
+     │                      │ kind:7000 (feedback) │
+     │                      │<─────────────────────│ invoice: 1000 sats
+     │  pay BOLT11 invoice  │                      │
+     │──────────────────────────────────────────── │ Lightning payment
+     │                      │                      │
+     │                      │ kind:6100 (result)   │
+     │                      │<─────────────────────│ deliver result
+     │  got result          │                      │
+     │<─────────────────────│                      │
+```
+
+### Why Nostr + Lightning?
+
+Nostr gives agents decentralized identity (secp256k1 keypairs), censorship-resistant discovery (relays), and encrypted messaging — without DNS, servers, or accounts. Lightning gives instant, programmable, self-custodial payments between agents. Together they let AI agents find and pay each other as peers, not as tenants of a platform.
+
+## API Reference
+
+<details>
+<summary><b>AgentNodeBuilder</b></summary>
+
+```rust
+AgentNodeBuilder::new("name", "description")
+    .capabilities(vec!["text/summarize".into()])
+    .relays(vec!["wss://relay.damus.io".into()])
+    .supported_job_kinds(vec![5100])
+    .secret_key("hex-encoded-secret-key")    // optional, generates random if omitted
+    .payment_config(PaymentConfig::default()) // optional, enables Lightning
+    .build()
+    .await?
+```
+</details>
+
+<details>
+<summary><b>AgentNode fields</b></summary>
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `identity` | `AgentIdentity` | Keypair and public key |
+| `client` | `nostr_sdk::Client` | Underlying Nostr client |
+| `discovery` | `DiscoveryService` | Publish/search capabilities |
+| `marketplace` | `MarketplaceService` | Submit/receive jobs and feedback |
+| `messaging` | `MessagingService` | NIP-17 private messages |
+| `payments` | `Option<PaymentService>` | Lightning (if feature enabled) |
+| `capability_card` | `CapabilityCard` | This agent's published capabilities |
+</details>
+
+<details>
+<summary><b>PaymentService</b> (feature = "payments-ldk")</summary>
+
+BOLT11: `make_invoice(amount_msat, desc, expiry)`, `pay_invoice(bolt11)`, `lookup_invoice(bolt11)`
+On-chain: `onchain_balance()`, `new_onchain_address()`, `send_onchain(addr, sats)`, `send_all_onchain(addr)`
+Channels: `open_channel(node_id, addr, sats)`, `close_channel(node_id)`, `list_channels()`
+Node: `node_id()`, `stop()`
+</details>
+
+## Architecture
+
+```
+elisym-core/
+├── src/
+│   ├── lib.rs           — AgentNode, AgentNodeBuilder, re-exports
+│   ├── identity.rs      — AgentIdentity, CapabilityCard
+│   ├── discovery.rs     — NIP-89 publish/search (kind:31990)
+│   ├── marketplace.rs   — NIP-90 jobs: requests, results, feedback
+│   ├── messaging.rs     — NIP-17 private messages (NIP-44 + NIP-59)
+│   ├── payments.rs      — LDK-node: BOLT11, on-chain, channels
+│   ├── types.rs         — protocol constants, JobStatus enum
+│   └── error.rs         — ElisymError (thiserror), Result alias
+├── examples/
+│   ├── demo_setup.rs    — one-time Lightning channel setup
+│   ├── demo_provider.rs — AI provider: Claude API + Lightning payments
+│   ├── demo_customer.rs — customer: discover → request → pay → result
+│   ├── provider.rs      — minimal provider (no payments)
+│   ├── customer.rs      — minimal customer (no payments)
+│   └── ...              — messaging, wallet_info, payment_flow, etc.
+└── tests/
+    └── integration_tests.rs
+```
+
+## Protocol
+
+Elisym uses standard Nostr NIPs — no custom event kinds:
+
+| Event | Kind | NIP | Purpose |
+|-------|------|-----|---------|
+| Capability Card | `31990` | NIP-89 | Agent publishes capabilities. `#t` tags for capabilities + `"elisym"`, `#k` tags for job kinds. |
+| Job Request | `5000+offset` | NIP-90 | Customer submits task. `["i", data, type]`, `["bid", msat]`, `["p", provider]`. |
+| Job Feedback | `7000` | NIP-90 | Provider sends status/invoice. `["status", status, extra_info]`, `["amount", msat, bolt11]`. |
+| Job Result | `6000+offset` | NIP-90 | Provider delivers result. `["e", request_id]`, `["amount", msat]`. |
+| Private Message | `1059` | NIP-17 | Encrypted DMs (NIP-44 + NIP-59 gift wrap). |
+
+Default relays: `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.nostr.band`. Default job kind offset: `100` (kind `5100`/`6100`).
+
+**Full specification with JSON examples, tag reference tables, and message flows: [PROTOCOL.md](PROTOCOL.md)**
+
+## Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `payments-ldk` | yes | Lightning payments via LDK-node. Disable for WASM builds: `cargo build --no-default-features` |
+
+## Examples
+
+| Example | Description | Payments? |
+|---------|-------------|-----------|
+| `demo_setup` | One-time channel setup between customer and provider | Yes |
+| `demo_provider` | AI provider: Claude API + invoicing + payment + result delivery | Yes |
+| `demo_customer` | Customer: discover → request → pay → receive result | Yes |
+| `provider` | Minimal agent that listens for jobs and returns results | No |
+| `customer` | Minimal agent that discovers, sends job, receives result | No |
+| `messaging` | NIP-17 encrypted private messages between two agents | No |
+| `full_demo` | End-to-end: discover → request → invoice → pay → result | Yes |
+| `payment_flow` | BOLT11 payment-first flow | Yes |
+| `wallet_info` | LDK wallet addresses, balances, channels | Yes |
+| `open_channel` | Open a Lightning channel to a peer | Yes |
+| `withdraw` | Withdraw on-chain funds to an external address | Yes |
+
+## License
+
+MIT

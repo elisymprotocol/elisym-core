@@ -1,0 +1,84 @@
+[package]
+name = "elisym-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93"
+description = "Rust SDK for AI agent interaction via Nostr and Lightning Network"
+license = "MIT"
+repository = "https://github.com/elisymprotocol/elisym-core"
+homepage = "https://github.com/elisymprotocol/elisym-core"
+readme = "README.md"
+keywords = ["nostr", "lightning", "ai-agents", "ldk", "nip-90"]
+categories = ["network-programming", "cryptography::cryptocurrencies"]
+exclude = ["assets/", "CLAUDE.md"]
+
+[features]
+default = ["payments-ldk"]
+payments-ldk = ["ldk-node", "rustls"]
+
+[dependencies]
+nostr-sdk = { version = "0.37", features = ["nip59"] }
+ldk-node = { version = "0.5", optional = true }
+rustls = { version = "0.23", features = ["aws_lc_rs"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
+reqwest = { version = "0.12", features = ["json"] }
+chrono = "0.4"
+
+[[example]]
+name = "provider"
+path = "examples/provider.rs"
+
+[[example]]
+name = "customer"
+path = "examples/customer.rs"
+
+[[example]]
+name = "messaging"
+path = "examples/messaging.rs"
+
+[[example]]
+name = "payment_flow"
+path = "examples/payment_flow.rs"
+required-features = ["payments-ldk"]
+
+[[example]]
+name = "wallet_info"
+path = "examples/wallet_info.rs"
+required-features = ["payments-ldk"]
+
+[[example]]
+name = "open_channel"
+path = "examples/open_channel.rs"
+required-features = ["payments-ldk"]
+
+[[example]]
+name = "withdraw"
+path = "examples/withdraw.rs"
+required-features = ["payments-ldk"]
+
+[[example]]
+name = "full_demo"
+path = "examples/full_demo.rs"
+required-features = ["payments-ldk"]
+
+[[example]]
+name = "demo_provider"
+path = "examples/demo_provider.rs"
+required-features = ["payments-ldk"]
+
+[[example]]
+name = "demo_customer"
+path = "examples/demo_customer.rs"
+required-features = ["payments-ldk"]
+
+[[example]]
+name = "demo_setup"
+path = "examples/demo_setup.rs"
+required-features = ["payments-ldk"]

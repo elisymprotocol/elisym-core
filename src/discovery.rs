@@ -1,0 +1,175 @@
+use std::collections::HashSet;
+use std::time::Duration;
+
+use nostr_sdk::prelude::*;
+use serde::{Deserialize, Serialize};
+
+use crate::error::Result;
+use crate::identity::{AgentIdentity, CapabilityCard};
+use crate::types::{kind, KIND_APP_HANDLER};
+
+/// A discovered agent with its capability card and event metadata.
+#[derive(Debug, Clone)]
+pub struct DiscoveredAgent {
+    pub pubkey: PublicKey,
+    pub card: CapabilityCard,
+    pub event_id: EventId,
+    pub supported_kinds: Vec<u16>,
+}
+
+/// Filter for searching agents.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentFilter {
+    pub capabilities: Vec<String>,
+    pub job_kind: Option<u16>,
+    pub since: Option<Timestamp>,
+}
+
+/// Service for publishing and discovering agent capabilities via NIP-89.
+#[derive(Debug, Clone)]
+pub struct DiscoveryService {
+    client: Client,
+    identity: AgentIdentity,
+}
+
+impl DiscoveryService {
+    pub fn new(client: Client, identity: AgentIdentity) -> Self {
+        Self { client, identity }
+    }
+
+    /// Publish a capability card as a NIP-89 kind:31990 parameterized replaceable event.
+    pub async fn publish_capability(
+        &self,
+        card: &CapabilityCard,
+        supported_job_kinds: &[u16],
+    ) -> Result<EventId> {
+        let content = card.to_json()?;
+        let pubkey_hex = self.identity.public_key().to_hex();
+
+        let mut tags: Vec<Tag> = vec![
+            Tag::identifier(pubkey_hex),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)),
+                vec!["elisym".to_string()],
+            ),
+        ];
+
+        for k in supported_job_kinds {
+            tags.push(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::K)),
+                vec![k.to_string()],
+            ));
+        }
+
+        for cap in &card.capabilities {
+            tags.push(Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)),
+                vec![cap.clone()],
+            ));
+        }
+
+        let builder = EventBuilder::new(kind(KIND_APP_HANDLER), content).tags(tags);
+        let output = self.client.send_event_builder(builder).await?;
+
+        tracing::info!(event_id = %output.val, "Published capability card");
+        Ok(output.val)
+    }
+
+    /// Search for agents matching the given filter.
+    ///
+    /// NIP-01 `custom_tag` uses OR semantics for multiple values, so we fetch
+    /// all elisym agents from relays and apply capability filtering locally
+    /// to get correct AND semantics (agent must have ALL requested capabilities).
+    pub async fn search_agents(&self, filter: &AgentFilter) -> Result<Vec<DiscoveredAgent>> {
+        let mut f = Filter::new().kind(kind(KIND_APP_HANDLER));
+
+        // Only filter by "elisym" tag on the relay side — adding capabilities
+        // here would use OR semantics (NIP-01), returning agents matching ANY tag.
+        f = f.custom_tag(
+            SingleLetterTag::lowercase(Alphabet::T),
+            vec!["elisym".to_string()],
+        );
+
+        if let Some(job_kind) = filter.job_kind {
+            f = f.custom_tag(
+                SingleLetterTag::lowercase(Alphabet::K),
+                vec![job_kind.to_string()],
+            );
+        }
+
+        if let Some(since) = filter.since {
+            f = f.since(since);
+        }
+
+        let events = self
+            .client
+            .fetch_events(vec![f], Some(Duration::from_secs(10)))
+            .await?;
+
+        let mut agents = Vec::new();
+        let mut seen_pubkeys = HashSet::new();
+        for event in events {
+            // Dedup by pubkey — same agent's card may arrive from multiple relays
+            if !seen_pubkeys.insert(event.pubkey) {
+                continue;
+            }
+            match CapabilityCard::from_json(&event.content) {
+                Ok(card) => {
+                    // Post-filter: agent must have ALL requested capabilities (AND semantics)
+                    if !filter.capabilities.is_empty() {
+                        let event_tags: Vec<String> = event
+                            .tags
+                            .iter()
+                            .filter_map(|tag| {
+                                let s = tag.as_slice();
+                                if s.first().map(|v| v.as_str()) == Some("t") {
+                                    s.get(1).map(|v| v.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+
+                        let has_all = filter
+                            .capabilities
+                            .iter()
+                            .all(|cap| event_tags.contains(cap));
+
+                        if !has_all {
+                            continue;
+                        }
+                    }
+
+                    let supported_kinds: Vec<u16> = event
+                        .tags
+                        .iter()
+                        .filter_map(|tag: &Tag| {
+                            let s = tag.as_slice();
+                            if s.first().map(|v| v.as_str()) == Some("k") {
+                                s.get(1).and_then(|v| v.parse().ok())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    agents.push(DiscoveredAgent {
+                        pubkey: event.pubkey,
+                        card,
+                        event_id: event.id,
+                        supported_kinds,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        event_id = %event.id,
+                        error = %e,
+                        "Failed to parse capability card, skipping"
+                    );
+                }
+            }
+        }
+
+        Ok(agents)
+    }
+}
