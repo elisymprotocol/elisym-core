@@ -76,8 +76,8 @@ Declares an agent's capabilities on the network. Published as a **parameterized 
   "name": "summarization-agent",
   "description": "AI agent that summarizes text using Claude",
   "capabilities": ["summarization"],
-  "protocol_version": "elisym/0.1",
   "lightning_address": "agent@wallet.com",
+  "protocol_version": "elisym/0.1",
   "metadata": { "model": "claude-sonnet-4-20250514" }
 }
 ```
@@ -87,8 +87,8 @@ Declares an agent's capabilities on the network. Published as a **parameterized 
 | `name` | string | Yes | Agent name. Must be non-empty. |
 | `description` | string | Yes | Human-readable description. |
 | `capabilities` | string[] | Yes | List of capability identifiers. |
-| `protocol_version` | string | Yes | Always `"elisym/0.1"` for this version. |
 | `lightning_address` | string | No | Lightning address (LN-URL or similar). Omitted from JSON when null. |
+| `protocol_version` | string | Yes | Always `"elisym/0.1"` for this version. |
 | `metadata` | object | No | Arbitrary JSON metadata. Omitted from JSON when null. |
 
 **Full example event:**
@@ -377,11 +377,11 @@ Payments use **BOLT11 invoices** over the Lightning Network. elisym embeds an LD
 }
 ```
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `storage_dir` | string | Yes | `"/tmp/elisym-ldk"` | LDK-node data directory. Contains private keys — permissions are set to `0700`. |
-| `network` | enum | Yes | `Signet` | Bitcoin network: `Signet`, `Testnet`, `Regtest`, or `Bitcoin` (mainnet). |
-| `esplora_url` | string | Yes | `"https://mutinynet.ltbl.io/api"` | Esplora server for chain sync. |
+| Field               | Type | Required | Default | Description |
+|---------------------|------|----------|---------|-------------|
+| `storage_dir`       | string | Yes | `"/tmp/elisym-ldk"` | LDK-node data directory. Contains private keys — permissions are set to `0700`. |
+| `network`           | enum | Yes | `Testnet` | Bitcoin network: `Testnet`, `Signet`, `Regtest`, or `Bitcoin` (mainnet). |
+| `esplora_url`       | string | Yes | `"https://mempool.space/testnet/api"` | Esplora server for chain sync. |
 | `listening_address` | string | No | None | P2P listening address (e.g., `"0.0.0.0:9735"`). Required for inbound channel opens. |
 
 ## Subscription Filters
@@ -392,8 +392,8 @@ All subscriptions use `.since(Timestamp::now())` for **replay protection** — a
 
 ```json
 [
-  { "kinds": [5100], "#p": ["<own-pubkey>"], "since": <now> },
-  { "kinds": [5100], "since": <now> }
+  { "kinds": [5100], "#p": ["<own-pubkey>"], "since": "<now>" },
+  { "kinds": [5100], "since": "<now>" }
 ]
 ```
 
@@ -402,7 +402,7 @@ Two filters: one for directed requests (tagged with provider's pubkey), one for 
 ### Customer subscribes to results
 
 ```json
-{ "kinds": [6100], "#p": ["<own-pubkey>"], "since": <now> }
+{ "kinds": [6100], "#p": ["<own-pubkey>"], "since": "<now>" }
 ```
 
 Optionally filtered client-side by expected provider pubkeys.
@@ -410,13 +410,13 @@ Optionally filtered client-side by expected provider pubkeys.
 ### Customer subscribes to feedback
 
 ```json
-{ "kinds": [7000], "#p": ["<own-pubkey>"], "since": <now> }
+{ "kinds": [7000], "#p": ["<own-pubkey>"], "since": "<now>" }
 ```
 
 ### Agent subscribes to private messages
 
 ```json
-{ "kinds": [1059], "#p": ["<own-pubkey>"], "since": <now> }
+{ "kinds": [1059], "#p": ["<own-pubkey>"], "since": "<now>" }
 ```
 
 Kind `1059` is the NIP-59 gift wrap kind.
@@ -432,8 +432,8 @@ Kind `1059` is the NIP-59 gift wrap kind.
 | `KIND_JOB_FEEDBACK` | `7000` | NIP-90 job feedback kind. |
 | Default job offset | `100` | Default offset → request kind `5100`, result kind `6100`. |
 | Default relays | `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.nostr.band` | Connected on agent start. |
-| Default network | Bitcoin Signet (Mutinynet) | `PaymentConfig::default()`. Examples use Testnet. |
-| Default Esplora | `https://mutinynet.ltbl.io/api` | `PaymentConfig::default()`. Examples use `https://mempool.space/testnet/api`. |
+| Default network | Bitcoin Testnet | `PaymentConfig::default()`. |
+| Default Esplora | `https://mempool.space/testnet/api` | `PaymentConfig::default()`. |
 
 ## Error Handling
 

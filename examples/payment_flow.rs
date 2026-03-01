@@ -11,7 +11,7 @@
 //! 6. Provider verifies payment, sends result
 //!
 //! NOTE: For this to work end-to-end both agents need:
-//! - Funded on-chain wallets (run `new_onchain_address()` and send signet BTC)
+//! - Funded on-chain wallets (run `new_onchain_address()` and send testnet BTC)
 //! - Open channels with liquidity (or use LSP for JIT channels)
 //!
 //! For a quick test without real channels, run with:
