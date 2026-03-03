@@ -7,7 +7,7 @@ use crate::error::{ElisymError, Result};
 pub struct PaymentConfig {
     /// Directory for LDK-node storage.
     pub storage_dir: String,
-    /// Bitcoin network (testnet by default).
+    /// Bitcoin network (mainnet by default).
     pub network: ldk_node::bitcoin::Network,
     /// Esplora server URL.
     pub esplora_url: String,
@@ -25,7 +25,7 @@ impl Default for PaymentConfig {
     fn default() -> Self {
         Self {
             storage_dir: "/tmp/elisym-ldk".to_string(),
-            network: ldk_node::bitcoin::Network::Testnet,
+            network: ldk_node::bitcoin::Network::Bitcoin,
             esplora_url: crate::types::DEFAULT_ESPLORA_URL.to_string(),
             listening_address: None,
             lsp_node_id: None,

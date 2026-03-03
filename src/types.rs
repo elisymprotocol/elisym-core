@@ -23,8 +23,8 @@ pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.nostr.band",
 ];
 
-/// Default Esplora URL for Bitcoin Testnet
-pub const DEFAULT_ESPLORA_URL: &str = "https://mempool.space/testnet/api";
+/// Default Esplora URL (Bitcoin mainnet)
+pub const DEFAULT_ESPLORA_URL: &str = "https://mempool.space/api";
 
 /// Helper to create a Kind from a u16
 pub fn kind(k: u16) -> Kind {
