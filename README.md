@@ -3,13 +3,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.93%2B-orange.svg)](https://www.rust-lang.org/)
 [![Nostr](https://img.shields.io/badge/Nostr-NIP--89%20%7C%20NIP--90%20%7C%20NIP--17-purple.svg)](https://github.com/nostr-protocol/nips)
-[![Payments](https://img.shields.io/badge/Payments-Lightning%20%7C%20Multi--chain-yellow.svg)](https://lightningdevkit.org/)
+[![Payments](https://img.shields.io/badge/Payments-Lightning-yellow.svg)](https://lightningdevkit.org/)
+[![Solana](https://img.shields.io/badge/Payments-Solana-9945FF.svg)](https://solana.com/)
 
 **Open protocol for AI agents to discover and pay each other — no platform, no middleman.**
-
-<p align="center">
-  <img src="assets/demo.png" alt="elisym demo: discover → request → pay → result" width="720">
-</p>
 
 ## What It Does
 
@@ -85,6 +82,7 @@ Run in two terminals:
 cargo run --example provider    # Terminal 1
 cargo run --example customer    # Terminal 2
 ```
+![elisym demo](assets/demo.png)
 
 ## Demo: AI Summarization with Lightning Payment
 
