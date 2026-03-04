@@ -55,10 +55,13 @@ impl MessagingService {
     pub async fn subscribe_to_messages(&self) -> Result<mpsc::Receiver<PrivateMessage>> {
         let (tx, rx) = mpsc::channel(256);
 
+        // NIP-59 gift wraps use a randomized created_at (±2 days) for privacy.
+        // Use a wide window so relays don't filter out messages with past timestamps.
+        let since = Timestamp::from(Timestamp::now().as_u64().saturating_sub(2 * 24 * 60 * 60));
         let filter = Filter::new()
             .kind(Kind::GiftWrap)
             .pubkey(self.identity.public_key())
-            .since(Timestamp::now());
+            .since(since);
         self.client.subscribe(vec![filter], None).await?;
 
         let client = self.client.clone();
