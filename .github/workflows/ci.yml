@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check (default features)
+        run: cargo check
+
+      - name: Check (Solana)
+        run: cargo check --features payments-solana
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Clippy (Solana)
+        run: cargo clippy --features payments-solana -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Test (Solana)
+        run: cargo test --features payments-solana
