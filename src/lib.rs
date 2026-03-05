@@ -326,14 +326,23 @@ impl AgentNodeBuilder {
         }
         client.connect().await;
 
-        // Wait briefly for relay connections to establish (connect is non-blocking)
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-        let connected = client.relays().await;
-        let connected_count = connected
-            .values()
-            .filter(|r| r.status() == nostr_sdk::RelayStatus::Connected)
-            .count();
+        // Wait for at least one relay to connect, with increasing backoff
+        let mut connected_count = 0;
+        for wait_secs in [2, 3, 5] {
+            tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+            let relays = client.relays().await;
+            connected_count = relays
+                .values()
+                .filter(|r| r.status() == nostr_sdk::RelayStatus::Connected)
+                .count();
+            if connected_count > 0 {
+                break;
+            }
+            tracing::warn!(
+                attempt_wait = wait_secs,
+                "No relays connected yet, retrying..."
+            );
+        }
         if connected_count == 0 {
             return Err(ElisymError::Config(
                 "No relays connected — cannot operate without at least one relay".into(),
