@@ -218,35 +218,6 @@ impl SolanaPaymentProvider {
         Ok(sig.to_string())
     }
 
-    /// Check if a fee transfer is viable: the destination account must either
-    /// already exist or the transfer amount must meet rent-exempt minimum.
-    /// Returns true if the fee should be included, false if it should be skipped.
-    fn should_include_fee(&self, fee_address: &Pubkey, fee_amount: u64) -> bool {
-        // If account already has balance, any transfer amount is fine
-        match self.rpc_client.get_balance(fee_address) {
-            Ok(balance) if balance > 0 => return true,
-            Ok(_) => {} // zero balance — need rent check
-            Err(_) => {} // can't reach RPC — be conservative, check rent
-        }
-
-        // Account doesn't exist: fee must meet rent-exempt minimum for a 0-data account
-        let rent_exempt_min = self
-            .rpc_client
-            .get_minimum_balance_for_rent_exemption(0)
-            .unwrap_or(890_880); // fallback to known constant
-
-        if fee_amount < rent_exempt_min {
-            tracing::warn!(
-                fee_amount,
-                rent_exempt_min,
-                fee_address = %fee_address,
-                "fee below rent-exempt minimum and account doesn't exist — skipping fee transfer"
-            );
-            return false;
-        }
-        true
-    }
-
     /// Build a native SOL transfer instruction with reference key.
     /// If `fee_params` is provided, adds a second transfer for the fee amount
     /// and sends `(amount - fee)` to the recipient.
@@ -259,10 +230,7 @@ impl SolanaPaymentProvider {
     ) -> Result<Transaction> {
         let mut instructions: Vec<Instruction> = Vec::new();
 
-        // Check if fee transfer is viable (rent-exempt check)
-        let effective_fee = fee_params.filter(|(addr, amt)| self.should_include_fee(addr, *amt));
-
-        let provider_amount = if let Some((_, fee_amount)) = effective_fee {
+        let provider_amount = if let Some((_, fee_amount)) = fee_params {
             amount.saturating_sub(*fee_amount)
         } else {
             amount
@@ -277,8 +245,8 @@ impl SolanaPaymentProvider {
             .push(AccountMeta::new_readonly(*reference, false));
         instructions.push(transfer_ix);
 
-        // Fee transfer (if viable)
-        if let Some((fee_address, fee_amount)) = effective_fee {
+        // Fee transfer
+        if let Some((fee_address, fee_amount)) = fee_params {
             #[allow(deprecated)]
             let fee_ix =
                 solana_sdk::system_instruction::transfer(&self.keypair.pubkey(), fee_address, *fee_amount);
