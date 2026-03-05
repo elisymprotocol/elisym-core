@@ -13,8 +13,11 @@ use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     message::Message,
     pubkey::Pubkey,
-    signature::{Keypair, Signer},
+    signature::{Keypair, Signature, Signer},
     transaction::Transaction,
+};
+use solana_transaction_status_client_types::{
+    EncodedTransaction, UiMessage, UiTransactionEncoding,
 };
 
 use crate::error::{ElisymError, Result};
@@ -505,6 +508,9 @@ impl PaymentProvider for SolanaPaymentProvider {
             .parse()
             .map_err(|e| ElisymError::Payment(format!("Invalid reference pubkey: {:?}", e)))?;
 
+        // Expected net amount the provider should receive
+        let expected_net = data.amount.saturating_sub(data.fee_amount.unwrap_or(0));
+
         // Query for signatures on the reference address
         let sigs = self
             .rpc_client
@@ -520,17 +526,65 @@ impl PaymentProvider for SolanaPaymentProvider {
             });
         }
 
-        // Found a signature — mark as settled in cache
-        {
-            let mut pending = self.pending.lock().unwrap();
-            if let Some(p) = pending.get_mut(request) {
-                p.settled = true;
+        // Verify the on-chain transfer amount
+        for sig_info in &sigs {
+            if sig_info.err.is_some() {
+                continue; // skip failed transactions
+            }
+
+            let sig: Signature = sig_info.signature.parse().map_err(|e| {
+                ElisymError::Payment(format!("Invalid signature: {:?}", e))
+            })?;
+
+            let tx_response = self
+                .rpc_client
+                .get_transaction(&sig, UiTransactionEncoding::Json)
+                .map_err(|e| {
+                    ElisymError::Payment(format!("Failed to get transaction: {}", e))
+                })?;
+
+            let meta = match &tx_response.transaction.meta {
+                Some(m) => m,
+                None => continue,
+            };
+
+            // Extract account keys from the transaction
+            let account_keys: Vec<String> = match &tx_response.transaction.transaction {
+                EncodedTransaction::Json(ui_tx) => match &ui_tx.message {
+                    UiMessage::Parsed(parsed) => {
+                        parsed.account_keys.iter().map(|k| k.pubkey.clone()).collect()
+                    }
+                    UiMessage::Raw(raw) => raw.account_keys.clone(),
+                },
+                _ => continue,
+            };
+
+            // Find recipient's index and verify SOL balance change.
+            // TODO: For SPL tokens, verify via meta.pre_token_balances / post_token_balances
+            // instead of pre_balances / post_balances (which only track native SOL).
+            if let Some(idx) = account_keys.iter().position(|k| k == &data.recipient) {
+                let pre = meta.pre_balances[idx];
+                let post = meta.post_balances[idx];
+                let received = post.saturating_sub(pre);
+
+                if received >= expected_net {
+                    // Payment verified — mark as settled
+                    let mut pending = self.pending.lock().unwrap();
+                    if let Some(p) = pending.get_mut(request) {
+                        p.settled = true;
+                    }
+                    return Ok(PaymentStatus {
+                        settled: true,
+                        amount: Some(received),
+                    });
+                }
             }
         }
 
+        // Signature found but amount insufficient
         Ok(PaymentStatus {
-            settled: true,
-            amount: Some(data.amount),
+            settled: false,
+            amount: None,
         })
     }
 
