@@ -90,13 +90,13 @@ End-to-end demo: customer discovers an AI provider on Nostr, submits a summariza
 
 ```bash
 # One-time: open a Lightning channel (~15-20 min for testnet confirmations)
-cargo run --example demo_setup
+cargo run --example demo_setup --features payments-ldk
 
 # Terminal 1: start the AI provider (calls Claude API)
-ANTHROPIC_API_KEY=sk-... cargo run --example demo_provider
+ANTHROPIC_API_KEY=sk-... cargo run --example demo_provider --features payments-ldk
 
 # Terminal 2: start the customer
-cargo run --example demo_customer
+cargo run --example demo_customer --features payments-ldk
 ```
 
 **What happens:**
@@ -252,7 +252,7 @@ Default relays: `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.nostr.band
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `payments-ldk` | yes | Lightning payments via LDK-node. Disable for WASM builds: `cargo build --no-default-features` |
+| `payments-ldk` | no | Lightning payments via LDK-node |
 | `payments-solana` | no | Solana payments (SOL + SPL tokens) |
 
 ## Examples
