@@ -214,6 +214,15 @@ impl LdkPaymentProvider {
                     );
                 }
             }
+
+            #[cfg(not(unix))]
+            {
+                tracing::warn!(
+                    dir = %config.storage_dir,
+                    "Cannot verify storage directory permissions on this platform — \
+                     ensure the directory is only readable by the current user (contains private keys)"
+                );
+            }
         }
 
         let node = tokio::task::spawn_blocking(move || {

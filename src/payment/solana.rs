@@ -70,6 +70,14 @@ impl SolanaPaymentConfig {
     }
 }
 
+/// Returns the current Unix timestamp in seconds.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs()
+}
+
 /// Internal request format serialized as JSON in the payment request string.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct SolanaPaymentRequestData {
@@ -79,18 +87,39 @@ struct SolanaPaymentRequestData {
     amount: u64,
     /// Ephemeral reference pubkey for payment detection.
     reference: String,
+    /// Human-readable description (for audit/debugging; not used on-chain).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    description: Option<String>,
     /// Fee recipient address (omitted when no fee configured).
     #[serde(skip_serializing_if = "Option::is_none")]
     fee_address: Option<String>,
     /// Fee amount in lamports (omitted when no fee configured).
     #[serde(skip_serializing_if = "Option::is_none")]
     fee_amount: Option<u64>,
+    /// Creation timestamp (Unix seconds). 0 means unset (old format).
+    #[serde(default)]
+    created_at: u64,
+    /// Expiry duration in seconds. 0 means no expiry (old format).
+    #[serde(default)]
+    expiry_secs: u32,
+}
+
+impl SolanaPaymentRequestData {
+    /// Returns `true` if this request has expired.
+    fn is_expired(&self) -> bool {
+        self.created_at > 0 && self.expiry_secs > 0 && {
+            let elapsed = now_secs().saturating_sub(self.created_at);
+            elapsed > self.expiry_secs as u64
+        }
+    }
 }
 
 /// Tracks a pending payment request.
 #[derive(Debug)]
 struct PendingPayment {
     amount: u64,
+    created_at: u64,
     settled: bool,
 }
 
@@ -107,6 +136,8 @@ pub struct SolanaPaymentProvider {
     keypair: Keypair,
     rpc_client: RpcClient,
     pending: Mutex<HashMap<String, PendingPayment>>,
+    /// Maximum fee percentage allowed in `pay()`, in basis points (default: 1000 = 10%).
+    max_fee_bps: u64,
 }
 
 impl std::fmt::Debug for SolanaPaymentProvider {
@@ -119,6 +150,9 @@ impl std::fmt::Debug for SolanaPaymentProvider {
 }
 
 impl SolanaPaymentProvider {
+    /// Default maximum fee in basis points (1000 = 10%).
+    const DEFAULT_MAX_FEE_BPS: u64 = 1000;
+
     /// Create a new Solana payment provider with the given config and keypair.
     pub fn new(config: SolanaPaymentConfig, keypair: Keypair) -> Self {
         let rpc_url = config.effective_rpc_url();
@@ -128,7 +162,14 @@ impl SolanaPaymentProvider {
             keypair,
             rpc_client,
             pending: Mutex::new(HashMap::new()),
+            max_fee_bps: Self::DEFAULT_MAX_FEE_BPS,
         }
+    }
+
+    /// Set the maximum fee percentage (in basis points) that `pay()` will accept.
+    /// 100 bps = 1%. Default is 1000 bps (10%).
+    pub fn set_max_fee_bps(&mut self, bps: u64) {
+        self.max_fee_bps = bps;
     }
 
     /// Create from a base58-encoded secret key.
@@ -247,12 +288,53 @@ impl SolanaPaymentProvider {
         Ok(tx)
     }
 
+    /// Validate fee parameters in an untrusted payment request.
+    ///
+    /// Checks that the fee address matches the expected address and the fee
+    /// percentage doesn't exceed the maximum allowed (in basis points: 100 = 1%).
+    ///
+    /// Call this **before** `pay()` to verify that a provider hasn't embedded
+    /// malicious fee parameters in their payment request.
+    pub fn validate_fee_params(
+        request: &str,
+        expected_fee_address: &str,
+        max_fee_bps: u64,
+    ) -> Result<()> {
+        let data: SolanaPaymentRequestData = serde_json::from_str(request)
+            .map_err(|e| ElisymError::Payment(format!("Invalid payment request: {}", e)))?;
+
+        match (&data.fee_address, data.fee_amount) {
+            (Some(addr), Some(amt)) if amt > 0 => {
+                if addr != expected_fee_address {
+                    return Err(ElisymError::Payment(format!(
+                        "Fee address mismatch: expected {}, got {}",
+                        expected_fee_address, addr
+                    )));
+                }
+                if data.amount == 0 {
+                    return Err(ElisymError::Payment(
+                        "Invalid payment request: amount is 0 but fee is non-zero".into(),
+                    ));
+                }
+                let fee_bps = (amt as u128 * 10_000) / data.amount as u128;
+                if fee_bps > max_fee_bps as u128 {
+                    return Err(ElisymError::Payment(format!(
+                        "Fee too high: {}bps exceeds max {}bps",
+                        fee_bps, max_fee_bps
+                    )));
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Shared logic for creating a payment request, with optional fee.
     fn create_payment_request_inner(
         &self,
         amount: u64,
-        _description: &str,
-        _expiry_secs: u32,
+        description: &str,
+        expiry_secs: u32,
         fee: Option<(String, u64)>,
     ) -> Result<PaymentRequest> {
         if amount == 0 {
@@ -270,12 +352,19 @@ impl SolanaPaymentProvider {
             None => (None, None),
         };
 
+        let now = now_secs();
+
+        let desc = if description.is_empty() { None } else { Some(description.to_string()) };
+
         let data = SolanaPaymentRequestData {
             recipient: self.keypair.pubkey().to_string(),
             amount,
             reference: reference.to_string(),
+            description: desc,
             fee_address,
             fee_amount,
+            created_at: now,
+            expiry_secs,
         };
 
         let request = serde_json::to_string(&data)
@@ -283,20 +372,22 @@ impl SolanaPaymentProvider {
 
         // Track this pending payment
         {
-            let mut pending = self
-                .pending
-                .lock()
-                .map_err(|_| ElisymError::Payment("internal lock poisoned".into()))?;
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
 
-            // Cap the pending map size by clearing settled entries
+            // Cap the pending map size by clearing settled and stale entries
             if pending.len() >= PENDING_MAP_CAP {
-                pending.retain(|_, v| !v.settled);
+                const STALE_SECS: u64 = 3600;
+                pending.retain(|_, v| {
+                    let stale = v.created_at > 0 && now.saturating_sub(v.created_at) >= STALE_SECS;
+                    !v.settled && !stale
+                });
             }
 
             pending.insert(
                 request.clone(),
                 PendingPayment {
                     amount,
+                    created_at: now,
                     settled: false,
                 },
             );
@@ -327,16 +418,32 @@ impl PaymentProvider for SolanaPaymentProvider {
 
     /// Pay a Solana payment request by sending a SOL transfer on-chain.
     ///
-    /// # Security
+    /// # Security — payment request is untrusted data
     ///
-    /// The caller **MUST** validate `fee_address` and `fee_amount` from the
-    /// deserialized payment request before calling this method. The payment request
-    /// is untrusted data — a malicious provider could set an arbitrary fee address
-    /// or inflate the fee amount. Always verify that the fee parameters match the
-    /// expected application fee configuration.
+    /// The `request` string is deserialized from a NIP-90 feedback event. While
+    /// the Nostr event itself is signed by the provider, the JSON payment request
+    /// inside it is plain text with no integrity protection at the SDK level.
+    ///
+    /// Callers **MUST** verify:
+    /// 1. **Recipient address** — ensure it matches the expected provider. The SDK
+    ///    does not validate this automatically. Compare `data.recipient` against the
+    ///    provider's known Solana address before calling `pay()`.
+    /// 2. **Fee parameters** — use [`SolanaPaymentProvider::validate_fee_params`]
+    ///    to check `fee_address` and `fee_amount`. A malicious provider could set
+    ///    an arbitrary fee address or inflate the fee amount.
+    ///
+    /// A built-in `max_fee_bps` safety rail rejects fees exceeding the configured
+    /// maximum (default: 10%), but this does not replace explicit validation.
     fn pay(&self, request: &str) -> Result<PaymentResult> {
         let data: SolanaPaymentRequestData = serde_json::from_str(request)
             .map_err(|e| ElisymError::Payment(format!("Invalid payment request: {}", e)))?;
+
+        // Check expiry before sending funds
+        if data.is_expired() {
+            return Err(ElisymError::Payment(
+                "Payment request has expired".into(),
+            ));
+        }
 
         let recipient: Pubkey = data
             .recipient
@@ -354,11 +461,16 @@ impl PaymentProvider for SolanaPaymentProvider {
         // against their expected fee configuration before calling pay().
         let fee_params = match (data.fee_address, data.fee_amount) {
             (Some(addr), Some(amt)) if amt > 0 => {
+                let fee_bps = if data.amount > 0 {
+                    (amt as u128 * 10_000 / data.amount as u128) as u64
+                } else {
+                    0
+                };
                 tracing::warn!(
                     fee_address = %addr,
                     fee_amount = amt,
                     total_amount = data.amount,
-                    fee_pct = format!("{:.1}%", (amt as f64 / data.amount as f64) * 100.0),
+                    fee_bps = fee_bps,
                     "Payment request contains fee parameters — ensure these were validated before calling pay()"
                 );
                 if amt >= data.amount {
@@ -366,6 +478,16 @@ impl PaymentProvider for SolanaPaymentProvider {
                         "fee_amount ({}) must be less than total amount ({})",
                         amt, data.amount
                     )));
+                }
+                // Safety rail: reject fees exceeding max_fee_bps
+                if data.amount > 0 {
+                    let fee_bps_val = (amt as u128 * 10_000) / data.amount as u128;
+                    if fee_bps_val > self.max_fee_bps as u128 {
+                        return Err(ElisymError::Payment(format!(
+                            "Fee {}bps exceeds max {}bps — call validate_fee_params() or set_max_fee_bps()",
+                            fee_bps_val, self.max_fee_bps
+                        )));
+                    }
                 }
                 let fee_pubkey: Pubkey = addr.parse().map_err(|e| {
                     ElisymError::Payment(format!("Invalid fee address: {:?}", e))
@@ -388,13 +510,20 @@ impl PaymentProvider for SolanaPaymentProvider {
         })
     }
 
+    /// Look up the status of a Solana payment by its request string.
+    ///
+    /// First checks a local in-memory cache of settled payments, then queries
+    /// the chain via `getSignaturesForAddress(reference)`.
+    ///
+    /// **Cache race note:** The cache lock is released between the initial check
+    /// and the on-chain query. In rare cases, concurrent cleanup (triggered by
+    /// `PENDING_MAP_CAP`) could evict the entry before the settled status is
+    /// written back. This is harmless — correctness is preserved, but the next
+    /// lookup will repeat the on-chain query instead of hitting the cache.
     fn lookup_payment(&self, request: &str) -> Result<PaymentStatus> {
         // Check local cache first
         {
-            let pending = self
-                .pending
-                .lock()
-                .map_err(|_| ElisymError::Payment("internal lock poisoned".into()))?;
+            let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(p) = pending.get(request) {
                 if p.settled {
                     return Ok(PaymentStatus {
@@ -408,6 +537,14 @@ impl PaymentProvider for SolanaPaymentProvider {
         // Parse the request to get the reference pubkey
         let data: SolanaPaymentRequestData = serde_json::from_str(request)
             .map_err(|e| ElisymError::Payment(format!("Invalid payment request: {}", e)))?;
+
+        // Check expiry — don't query chain for expired requests
+        if data.is_expired() {
+            return Ok(PaymentStatus {
+                settled: false,
+                amount: None,
+            });
+        }
 
         let reference: Pubkey = data
             .reference
@@ -432,8 +569,10 @@ impl PaymentProvider for SolanaPaymentProvider {
             });
         }
 
-        // Verify the on-chain transfer amount
-        for sig_info in &sigs {
+        // Verify the on-chain transfer amount (check at most 10 signatures
+        // to bound RPC calls for references that accumulate many transactions)
+        const MAX_SIG_CHECK: usize = 10;
+        for sig_info in sigs.iter().take(MAX_SIG_CHECK) {
             if sig_info.err.is_some() {
                 continue; // skip failed transactions
             }
@@ -472,12 +611,12 @@ impl PaymentProvider for SolanaPaymentProvider {
                 let received = post.saturating_sub(pre);
 
                 if received >= expected_net {
-                    // Payment verified — remove from pending (no longer needed)
-                    let mut pending = self
-                        .pending
-                        .lock()
-                        .map_err(|_| ElisymError::Payment("internal lock poisoned".into()))?;
-                    pending.remove(request);
+                    // Payment verified — mark as settled in cache so future lookups
+                    // skip the on-chain query.
+                    let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(p) = pending.get_mut(request) {
+                        p.settled = true;
+                    }
                     return Ok(PaymentStatus {
                         settled: true,
                         amount: Some(received),
@@ -544,18 +683,25 @@ mod tests {
             recipient: "11111111111111111111111111111111".to_string(),
             amount: 10_000_000,
             reference: "22222222222222222222222222222222".to_string(),
+            description: None,
             fee_address: None,
             fee_amount: None,
+            created_at: 1700000000,
+            expiry_secs: 3600,
         };
         let json = serde_json::to_string(&data).unwrap();
         assert!(!json.contains("fee_address"));
         assert!(!json.contains("fee_amount"));
+        assert!(json.contains("created_at"));
+        assert!(json.contains("expiry_secs"));
         let parsed: SolanaPaymentRequestData = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.recipient, data.recipient);
         assert_eq!(parsed.amount, data.amount);
         assert_eq!(parsed.reference, data.reference);
         assert!(parsed.fee_address.is_none());
         assert!(parsed.fee_amount.is_none());
+        assert_eq!(parsed.created_at, 1700000000);
+        assert_eq!(parsed.expiry_secs, 3600);
     }
 
     #[test]
@@ -564,8 +710,11 @@ mod tests {
             recipient: "11111111111111111111111111111111".to_string(),
             amount: 100_000,
             reference: "22222222222222222222222222222222".to_string(),
+            description: None,
             fee_address: Some("33333333333333333333333333333333".to_string()),
             fee_amount: Some(3_000),
+            created_at: 1700000000,
+            expiry_secs: 3600,
         };
         let json = serde_json::to_string(&data).unwrap();
         assert!(json.contains("fee_address"));
@@ -638,6 +787,7 @@ mod tests {
                     format!("request_{}", i),
                     PendingPayment {
                         amount: 1000,
+                        created_at: now_secs(),
                         settled: true,
                     },
                 );
@@ -653,5 +803,191 @@ mod tests {
             assert_eq!(pending.len(), 1);
             assert!(pending.contains_key(&req.request));
         }
+    }
+
+    #[test]
+    fn test_expiry_check() {
+        let data = SolanaPaymentRequestData {
+            recipient: "11111111111111111111111111111111".to_string(),
+            amount: 100_000,
+            reference: "22222222222222222222222222222222".to_string(),
+            description: None,
+            fee_address: None,
+            fee_amount: None,
+            created_at: now_secs() - 7200, // 2 hours ago
+            expiry_secs: 3600,             // 1 hour expiry
+        };
+        assert!(data.is_expired());
+
+        let fresh = SolanaPaymentRequestData {
+            created_at: now_secs(),
+            expiry_secs: 3600,
+            ..data.clone()
+        };
+        assert!(!fresh.is_expired());
+
+        // Old format (no expiry) should never be considered expired
+        let old_format = SolanaPaymentRequestData {
+            created_at: 0,
+            expiry_secs: 0,
+            ..data
+        };
+        assert!(!old_format.is_expired());
+    }
+
+    #[test]
+    fn test_validate_fee_params_valid() {
+        let data = SolanaPaymentRequestData {
+            recipient: "11111111111111111111111111111111".to_string(),
+            amount: 100_000,
+            reference: "22222222222222222222222222222222".to_string(),
+            description: None,
+            fee_address: Some("FeeAddr111111111111111111111111".to_string()),
+            fee_amount: Some(3_000), // 3%
+            created_at: now_secs(),
+            expiry_secs: 3600,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+
+        // Valid: correct address, within limit (500 bps = 5%)
+        assert!(SolanaPaymentProvider::validate_fee_params(&json, "FeeAddr111111111111111111111111", 500).is_ok());
+    }
+
+    #[test]
+    fn test_validate_fee_params_wrong_address() {
+        let data = SolanaPaymentRequestData {
+            recipient: "11111111111111111111111111111111".to_string(),
+            amount: 100_000,
+            reference: "22222222222222222222222222222222".to_string(),
+            description: None,
+            fee_address: Some("EvilAddr11111111111111111111111".to_string()),
+            fee_amount: Some(3_000),
+            created_at: now_secs(),
+            expiry_secs: 3600,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+
+        let result = SolanaPaymentProvider::validate_fee_params(&json, "FeeAddr111111111111111111111111", 500);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mismatch"));
+    }
+
+    #[test]
+    fn test_validate_fee_params_too_high() {
+        let data = SolanaPaymentRequestData {
+            recipient: "11111111111111111111111111111111".to_string(),
+            amount: 100_000,
+            reference: "22222222222222222222222222222222".to_string(),
+            description: None,
+            fee_address: Some("FeeAddr111111111111111111111111".to_string()),
+            fee_amount: Some(50_000), // 50%
+            created_at: now_secs(),
+            expiry_secs: 3600,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+
+        let result = SolanaPaymentProvider::validate_fee_params(&json, "FeeAddr111111111111111111111111", 500);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too high"));
+    }
+
+    #[test]
+    fn test_validate_fee_params_zero_amount() {
+        // Crafted malicious request with amount=0 should not panic
+        let data = SolanaPaymentRequestData {
+            recipient: "11111111111111111111111111111111".to_string(),
+            amount: 0,
+            reference: "22222222222222222222222222222222".to_string(),
+            description: None,
+            fee_address: Some("FeeAddr111111111111111111111111".to_string()),
+            fee_amount: Some(1),
+            created_at: now_secs(),
+            expiry_secs: 3600,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+
+        let result = SolanaPaymentProvider::validate_fee_params(&json, "FeeAddr111111111111111111111111", 500);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("amount is 0"));
+    }
+
+    #[test]
+    fn test_validate_fee_params_no_fee_ok() {
+        let data = SolanaPaymentRequestData {
+            recipient: "11111111111111111111111111111111".to_string(),
+            amount: 100_000,
+            reference: "22222222222222222222222222222222".to_string(),
+            description: None,
+            fee_address: None,
+            fee_amount: None,
+            created_at: now_secs(),
+            expiry_secs: 3600,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+
+        assert!(SolanaPaymentProvider::validate_fee_params(&json, "anything", 500).is_ok());
+    }
+
+    #[test]
+    fn test_pay_rejects_excessive_fee() {
+        let keypair = Keypair::new();
+        let provider = SolanaPaymentProvider::new(SolanaPaymentConfig::default(), keypair);
+        // Use valid Solana pubkeys (base58-encoded 32-byte keys)
+        let recipient = Keypair::new().pubkey().to_string();
+        let reference = Keypair::new().pubkey().to_string();
+        let fee_addr = Keypair::new().pubkey().to_string();
+        // Construct a request with 50% fee (5000 bps) — exceeds default 1000 bps max
+        let data = SolanaPaymentRequestData {
+            recipient,
+            amount: 100_000,
+            reference,
+            description: None,
+            fee_address: Some(fee_addr),
+            fee_amount: Some(50_000), // 50%
+            created_at: now_secs(),
+            expiry_secs: 3600,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let result = provider.pay(&json);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("exceeds max"), "unexpected error: {}", err_msg);
+    }
+
+    #[test]
+    fn test_pay_allows_fee_within_limit() {
+        let keypair = Keypair::new();
+        let mut provider = SolanaPaymentProvider::new(SolanaPaymentConfig::default(), keypair);
+        provider.set_max_fee_bps(500); // 5%
+        let recipient = Keypair::new().pubkey().to_string();
+        let reference = Keypair::new().pubkey().to_string();
+        let fee_addr = Keypair::new().pubkey().to_string();
+        // 3% fee should pass the safety rail (will fail later on RPC, which is fine)
+        let data = SolanaPaymentRequestData {
+            recipient,
+            amount: 100_000,
+            reference,
+            description: None,
+            fee_address: Some(fee_addr),
+            fee_amount: Some(3_000), // 3%
+            created_at: now_secs(),
+            expiry_secs: 3600,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let result = provider.pay(&json);
+        // Should NOT fail with fee error — will fail on RPC instead
+        if let Err(e) = &result {
+            assert!(!e.to_string().contains("exceeds max"), "fee should be accepted: {}", e);
+        }
+    }
+
+    #[test]
+    fn test_create_payment_request_sets_expiry() {
+        let keypair = Keypair::new();
+        let provider = SolanaPaymentProvider::new(SolanaPaymentConfig::default(), keypair);
+        let req = provider.create_payment_request(10_000, "test", 3600).unwrap();
+        let data: SolanaPaymentRequestData = serde_json::from_str(&req.request).unwrap();
+        assert!(data.created_at > 0);
+        assert_eq!(data.expiry_secs, 3600);
     }
 }

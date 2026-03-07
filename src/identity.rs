@@ -96,6 +96,12 @@ impl CapabilityCard {
                 "name is required".into(),
             ));
         }
+        if !card.protocol_version.starts_with("elisym/") {
+            return Err(ElisymError::InvalidCapabilityCard(format!(
+                "unsupported protocol version: {}",
+                card.protocol_version
+            )));
+        }
         Ok(card)
     }
 }
@@ -136,5 +142,12 @@ mod tests {
     fn test_capability_card_empty_name_fails() {
         let json = r#"{"name":"","description":"x","capabilities":[],"protocol_version":"elisym/0.1"}"#;
         assert!(CapabilityCard::from_json(json).is_err());
+    }
+
+    #[test]
+    fn test_capability_card_invalid_protocol_version_fails() {
+        let json = r#"{"name":"test","description":"x","capabilities":[],"protocol_version":"unknown/1.0"}"#;
+        let err = CapabilityCard::from_json(json).unwrap_err();
+        assert!(err.to_string().contains("unsupported protocol version"));
     }
 }

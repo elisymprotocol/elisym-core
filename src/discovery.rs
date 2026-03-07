@@ -23,6 +23,9 @@ pub struct AgentFilter {
     pub capabilities: Vec<String>,
     pub job_kind: Option<u16>,
     pub since: Option<Timestamp>,
+    /// Maximum number of agents to return. `None` means no limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 /// Service for publishing and discovering agent capabilities via NIP-89.
@@ -80,6 +83,12 @@ impl DiscoveryService {
     /// NIP-01 `custom_tag` uses OR semantics for multiple values, so we fetch
     /// all elisym agents from relays and apply capability filtering locally
     /// to get correct AND semantics (agent must have ALL requested capabilities).
+    ///
+    /// **Scalability note:** This fetches all elisym capability cards from relays
+    /// and filters client-side. At small scale this is fine, but on a busy network
+    /// with thousands of agents it will become expensive. The `limit` field
+    /// truncates results *after* fetching. Relay-side pagination or caching may
+    /// be needed for production at scale.
     pub async fn search_agents(&self, filter: &AgentFilter) -> Result<Vec<DiscoveredAgent>> {
         let mut f = Filter::new().kind(kind(KIND_APP_HANDLER));
 
@@ -115,43 +124,37 @@ impl DiscoveryService {
             }
             match CapabilityCard::from_json(&event.content) {
                 Ok(card) => {
+                    // Single pass: collect "t" tags into a set and "k" tags into kinds
+                    let mut event_tags: HashSet<&str> = HashSet::new();
+                    let mut supported_kinds: Vec<u16> = Vec::new();
+                    for tag in event.tags.iter() {
+                        let s = tag.as_slice();
+                        match s.first().map(|v| v.as_str()) {
+                            Some("t") => {
+                                if let Some(v) = s.get(1) {
+                                    event_tags.insert(v.as_str());
+                                }
+                            }
+                            Some("k") => {
+                                if let Some(v) = s.get(1).and_then(|v| v.parse().ok()) {
+                                    supported_kinds.push(v);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
                     // Post-filter: agent must have ALL requested capabilities (AND semantics)
                     if !filter.capabilities.is_empty() {
-                        let event_tags: Vec<String> = event
-                            .tags
-                            .iter()
-                            .filter_map(|tag| {
-                                let s = tag.as_slice();
-                                if s.first().map(|v| v.as_str()) == Some("t") {
-                                    s.get(1).map(|v| v.to_string())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-
                         let has_all = filter
                             .capabilities
                             .iter()
-                            .all(|cap| event_tags.contains(cap));
+                            .all(|cap| event_tags.contains(cap.as_str()));
 
                         if !has_all {
                             continue;
                         }
                     }
-
-                    let supported_kinds: Vec<u16> = event
-                        .tags
-                        .iter()
-                        .filter_map(|tag: &Tag| {
-                            let s = tag.as_slice();
-                            if s.first().map(|v| v.as_str()) == Some("k") {
-                                s.get(1).and_then(|v| v.parse().ok())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
 
                     agents.push(DiscoveredAgent {
                         pubkey: event.pubkey,
@@ -168,6 +171,10 @@ impl DiscoveryService {
                     );
                 }
             }
+        }
+
+        if let Some(limit) = filter.limit {
+            agents.truncate(limit);
         }
 
         Ok(agents)

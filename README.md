@@ -24,7 +24,7 @@ Provider publishes capabilities    Customer discovers provider    Task + payment
 ```toml
 # Cargo.toml
 [dependencies]
-elisym-core = "0.1"
+elisym-core = "0.11"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -147,11 +147,10 @@ Nostr gives agents decentralized identity (secp256k1 keypairs), censorship-resis
 AgentNodeBuilder::new("name", "description")
     .capabilities(vec!["text/summarize".into()])
     .relays(vec!["wss://relay.damus.io".into()])
-    .supported_job_kinds(vec![5100])
+    .supported_job_kinds(vec![5100])               // default: [5100] (offset 100)
     .secret_key("hex-encoded-secret-key")          // optional, generates random if omitted
     .ldk_payment_config(LdkPaymentConfig::default()) // optional, enables Lightning
     .solana_payment_provider(solana_provider)       // optional, enables Solana
-    .fee_config(fee_config)                        // optional, enables fee system
     .build()
     .await?
 ```
@@ -167,8 +166,7 @@ AgentNodeBuilder::new("name", "description")
 | `discovery` | `DiscoveryService` | Publish/search capabilities |
 | `marketplace` | `MarketplaceService` | Submit/receive jobs and feedback |
 | `messaging` | `MessagingService` | NIP-17 private messages |
-| `payments` | `Option<Box<dyn PaymentProvider>>` | Payment provider (if configured) |
-| `fee_config` | `Option<FeeConfig>` | Fee configuration |
+| `payments` | `Option<Arc<dyn PaymentProvider>>` | Payment provider (if configured) |
 | `capability_card` | `CapabilityCard` | This agent's published capabilities |
 </details>
 
@@ -195,9 +193,10 @@ Node: `node_id()`, `stop()`
 
 Access via `agent.ldk_payments()` for LDK-specific methods.
 
-**SolanaPaymentProvider** (feature = "payments-solana"): Native SOL and SPL token transfers.
-Wallet: `address()`, `balance()`, `token_balance()`, `request_airdrop(lamports)`
+**SolanaPaymentProvider** (feature = "payments-solana"): Native SOL transfers.
+Wallet: `address()`, `balance()`, `request_airdrop(lamports)`
 Constructors: `new(config, keypair)`, `from_secret_key(config, base58)`, `from_bytes(config, bytes)`
+Fee: `create_payment_request_with_fee(amount, desc, expiry, fee_addr, fee_amt)`, `validate_fee_params(request, expected_addr, max_bps)`, `set_max_fee_bps(bps)`
 
 Access via `agent.solana_payments()` for Solana-specific methods.
 </details>
@@ -213,9 +212,10 @@ elisym-core/
 │   ├── marketplace.rs   — NIP-90 jobs: requests, results, feedback
 │   ├── messaging.rs     — NIP-17 private messages (NIP-44 + NIP-59)
 │   ├── payment/
-│   │   ├── mod.rs       — PaymentProvider trait, PaymentChain, FeeConfig
+│   │   ├── mod.rs       — PaymentProvider trait, PaymentChain, PaymentRequest/Result/Status
 │   │   ├── ldk.rs       — LDK-node: BOLT11, on-chain, channels
-│   │   └── solana.rs    — Solana: SOL + SPL token transfers
+│   │   └── solana.rs    — Solana: native SOL transfers, reference-based detection
+│   ├── dedup.rs         — BoundedDedup, notification lag handling (internal)
 │   ├── types.rs         — protocol constants, JobStatus enum
 │   └── error.rs         — ElisymError (thiserror), Result alias
 ├── examples/
@@ -253,7 +253,7 @@ Default relays: `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.nostr.band
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `payments-ldk` | no | Lightning payments via LDK-node |
-| `payments-solana` | no | Solana payments (SOL + SPL tokens) |
+| `payments-solana` | no | Solana payments (native SOL) |
 
 ## Examples
 
@@ -272,6 +272,14 @@ Default relays: `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.nostr.band
 | `withdraw` | Withdraw on-chain funds to an external address | `payments-ldk` |
 | `solana_demo_provider` | AI provider: Claude API + Solana devnet payments | `payments-solana` |
 | `solana_demo_customer` | Customer: discover → request → pay → receive result (Solana) | `payments-solana` |
+
+## Security Considerations
+
+- **Payment requests are untrusted data.** The Solana payment request JSON has no SDK-level integrity protection. Before calling `pay()`, callers **must** verify:
+  - The `recipient` address matches the expected provider
+  - Fee parameters are valid — use `SolanaPaymentProvider::validate_fee_params()`
+- **LDK storage contains private keys.** On Unix, the SDK enforces `0700` permissions on the storage directory. On other platforms, a warning is logged.
+- **`process_job_with_payment` is cancellation-safe.** Once payment is confirmed, result delivery runs in an independent `tokio::spawn` task — dropping the parent future will not abort delivery.
 
 ## See Also
 

@@ -70,15 +70,29 @@ pub struct PaymentStatus {
 /// Core payment interface that all payment backends implement.
 ///
 /// Implementations must be `Send + Sync + Debug` to allow storage in `AgentNode`.
+///
+/// **Blocking behavior:** Methods on this trait are synchronous (`&self`, not
+/// `async`). Implementations may perform blocking I/O (e.g., Solana RPC calls,
+/// LDK-node operations). In async contexts, wrap calls in
+/// `tokio::task::spawn_blocking()` to avoid blocking the async runtime.
+/// See `AgentNode::process_job_with_payment()` for an example.
 pub trait PaymentProvider: Send + Sync + std::fmt::Debug {
     /// Which chain this provider operates on.
     fn chain(&self) -> PaymentChain;
 
     /// Create a payment request (invoice) for the given amount.
     ///
-    /// - `amount`: amount in the chain's base unit (msat for Lightning)
-    /// - `description`: human-readable description
-    /// - `expiry_secs`: how long the request is valid
+    /// # Amount units (important — wrong unit = wrong payment!)
+    ///
+    /// | Chain     | Unit     | 1 SOL / 1 BTC equivalent |
+    /// |-----------|----------|--------------------------|
+    /// | Lightning | **millisatoshi (msat)** | 100,000,000,000 msat = 1 BTC |
+    /// | Solana    | **lamport**             | 1,000,000,000 lamports = 1 SOL |
+    ///
+    /// - `amount`: amount in the chain's base unit — see table above
+    /// - `description`: human-readable description (Lightning only; Solana ignores this)
+    /// - `expiry_secs`: how long the request is valid (Lightning enforced at protocol level;
+    ///   Solana embeds the timestamp and checks expiry in `lookup_payment`/`pay`)
     fn create_payment_request(
         &self,
         amount: u64,
@@ -86,7 +100,7 @@ pub trait PaymentProvider: Send + Sync + std::fmt::Debug {
         expiry_secs: u32,
     ) -> Result<PaymentRequest>;
 
-    /// Pay a payment request string (BOLT11 invoice, etc.).
+    /// Pay a payment request string (BOLT11 invoice for Lightning, JSON for Solana, etc.).
     fn pay(&self, request: &str) -> Result<PaymentResult>;
 
     /// Look up the status of a payment by its request string.

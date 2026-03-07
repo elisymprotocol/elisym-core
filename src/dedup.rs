@@ -1,10 +1,37 @@
 use std::collections::{HashSet, VecDeque};
 use std::hash::Hash;
 
+use nostr_sdk::RelayPoolNotification;
+
+/// Max number of event IDs to keep for deduplication in subscription handlers.
+pub(crate) const DEDUP_CAPACITY: usize = 10_000;
+
+/// Receive the next notification, handling lagged broadcast receivers by
+/// logging the skip and continuing. Returns `None` when the channel is closed.
+pub(crate) async fn recv_notification(
+    notifications: &mut tokio::sync::broadcast::Receiver<RelayPoolNotification>,
+) -> Option<RelayPoolNotification> {
+    loop {
+        match notifications.recv().await {
+            Ok(n) => return Some(n),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(skipped = n, "Subscription receiver lagged, some events may have been missed");
+                continue;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+        }
+    }
+}
+
 /// A bounded deduplication set that evicts the oldest entries when full.
 ///
 /// Used in subscription handlers to prevent duplicate event delivery
 /// without unbounded memory growth in long-running processes.
+///
+/// **Eviction caveat:** Once the capacity is reached, the oldest IDs are
+/// evicted and could be re-delivered as "new". For long-running agents,
+/// handle idempotency at the business logic layer (e.g., track processed
+/// job IDs in persistent storage).
 pub(crate) struct BoundedDedup<T> {
     set: HashSet<T>,
     order: VecDeque<T>,
@@ -13,6 +40,7 @@ pub(crate) struct BoundedDedup<T> {
 
 impl<T: Hash + Eq + Clone> BoundedDedup<T> {
     pub fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
         Self {
             set: HashSet::with_capacity(capacity),
             order: VecDeque::with_capacity(capacity),

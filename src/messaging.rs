@@ -2,26 +2,10 @@ use nostr_sdk::prelude::*;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use crate::dedup::BoundedDedup;
+use crate::Subscription;
+use crate::dedup::{BoundedDedup, recv_notification, DEDUP_CAPACITY};
 use crate::error::Result;
 use crate::identity::AgentIdentity;
-
-/// Receive the next notification, handling lagged broadcast receivers by
-/// logging the skip and continuing. Returns `None` when the channel is closed.
-async fn recv_notification(
-    notifications: &mut tokio::sync::broadcast::Receiver<RelayPoolNotification>,
-) -> Option<RelayPoolNotification> {
-    loop {
-        match notifications.recv().await {
-            Ok(n) => return Some(n),
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(skipped = n, "Subscription receiver lagged, some events may have been missed");
-                continue;
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-        }
-    }
-}
 
 /// A received private message.
 #[derive(Debug, Clone)]
@@ -68,8 +52,13 @@ impl MessagingService {
     }
 
     /// Subscribe to incoming private messages.
-    /// Returns a receiver channel that yields messages as they arrive.
-    pub async fn subscribe_to_messages(&self) -> Result<mpsc::Receiver<PrivateMessage>> {
+    ///
+    /// Returns a [`Subscription`] that yields messages via `.recv()`.
+    /// Call `.cancel()` to abort the background task, or drop the subscription.
+    ///
+    /// **Backpressure:** The internal channel holds 256 items. If the receiver
+    /// is not drained fast enough, the sending task blocks until space is available.
+    pub async fn subscribe_to_messages(&self) -> Result<Subscription<PrivateMessage>> {
         let (tx, rx) = mpsc::channel(256);
 
         // NIP-59 gift wraps use a randomized created_at (±2 days) for privacy.
@@ -82,9 +71,9 @@ impl MessagingService {
         self.client.subscribe(vec![filter], None).await?;
 
         let client = self.client.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut notifications = client.notifications();
-            let mut seen = BoundedDedup::new(10_000);
+            let mut seen = BoundedDedup::new(DEDUP_CAPACITY);
             while let Some(notification) = recv_notification(&mut notifications).await {
                 if let RelayPoolNotification::Event { event, .. } = notification {
                     if !seen.insert(event.id) {
@@ -113,6 +102,6 @@ impl MessagingService {
             tracing::warn!("subscription task ended: messages (notification channel closed)");
         });
 
-        Ok(rx)
+        Ok(Subscription::new(rx, handle))
     }
 }

@@ -1,30 +1,11 @@
 use nostr_sdk::prelude::*;
 use tokio::sync::mpsc;
 
-use crate::dedup::BoundedDedup;
+use crate::Subscription;
+use crate::dedup::{BoundedDedup, recv_notification, DEDUP_CAPACITY};
 use crate::error::{ElisymError, Result};
 use crate::identity::AgentIdentity;
 use crate::types::{kind, job_request_kind, job_result_kind, JobStatus, KIND_JOB_FEEDBACK, KIND_JOB_REQUEST_BASE, KIND_JOB_RESULT_BASE};
-
-/// Receive the next notification, handling lagged broadcast receivers by
-/// logging the skip and continuing. Returns `None` when the channel is closed.
-async fn recv_notification(
-    notifications: &mut tokio::sync::broadcast::Receiver<RelayPoolNotification>,
-) -> Option<RelayPoolNotification> {
-    loop {
-        match notifications.recv().await {
-            Ok(n) => return Some(n),
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(skipped = n, "Subscription receiver lagged, some events may have been missed");
-                continue;
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-        }
-    }
-}
-
-/// Max number of event IDs to keep for deduplication in subscription handlers.
-const DEDUP_CAPACITY: usize = 10_000;
 
 /// A job request received or sent via NIP-90.
 #[derive(Debug, Clone)]
@@ -52,11 +33,21 @@ pub struct JobResult {
 }
 
 /// A job feedback event via NIP-90.
+///
+/// The `status` field is stored as a raw `String` (not [`JobStatus`]) for
+/// forward-compatibility: relays may deliver feedback with custom or
+/// future status values that the current enum doesn't cover. Use
+/// [`parsed_status()`](Self::parsed_status) to convert to a typed
+/// [`JobStatus`] when the value is known.
+///
+/// [`JobStatus`]: crate::types::JobStatus
 #[derive(Debug, Clone)]
 pub struct JobFeedback {
     pub event_id: EventId,
     pub provider: PublicKey,
     pub request_id: EventId,
+    /// Raw status string from the Nostr event. Use [`parsed_status()`](Self::parsed_status)
+    /// to convert to a typed [`JobStatus`] if it matches a known value.
     pub status: String,
     pub extra_info: Option<String>,
     pub payment_request: Option<String>,
@@ -79,6 +70,14 @@ impl JobFeedback {
 }
 
 /// Service for NIP-90 Data Vending Machine job marketplace.
+///
+/// # Notification channel architecture
+///
+/// All subscription methods (`subscribe_to_*`) use `nostr_sdk`'s shared broadcast
+/// channel. Every notification is delivered to *all* active subscription tasks, each
+/// of which filters by event kind. This means N events × M subscriptions of filtering
+/// work. At moderate scale this is acceptable, but with many concurrent subscriptions
+/// on a high-throughput relay it may become a bottleneck.
 #[derive(Debug, Clone)]
 pub struct MarketplaceService {
     client: Client,
@@ -145,11 +144,19 @@ impl MarketplaceService {
     /// If `expected_providers` is non-empty, only results from those providers
     /// are forwarded. This prevents accepting results from unknown parties
     /// when jobs were sent to specific providers.
+    ///
+    /// Returns a [`Subscription`] that yields results via `.recv()`.
+    /// Call `.cancel()` to abort the background task, or drop the subscription.
+    ///
+    /// **Backpressure:** The internal channel holds 256 items. If the receiver
+    /// is not drained fast enough, the sending task blocks until space is available.
+    /// Slow consumers will not lose events, but may delay processing of other
+    /// notification types sharing the same broadcast channel.
     pub async fn subscribe_to_results(
         &self,
         kind_offsets: &[u16],
         expected_providers: &[PublicKey],
-    ) -> Result<mpsc::Receiver<JobResult>> {
+    ) -> Result<Subscription<JobResult>> {
         let (tx, rx) = mpsc::channel(256);
 
         let kinds: Vec<Kind> = kind_offsets
@@ -171,7 +178,7 @@ impl MarketplaceService {
 
         let client = self.client.clone();
         let allowed: Vec<PublicKey> = expected_providers.to_vec();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut notifications = client.notifications();
             let mut seen = BoundedDedup::new(DEDUP_CAPACITY);
             while let Some(notification) = recv_notification(&mut notifications).await {
@@ -200,11 +207,17 @@ impl MarketplaceService {
             tracing::warn!("subscription task ended: results (notification channel closed)");
         });
 
-        Ok(rx)
+        Ok(Subscription::new(rx, handle))
     }
 
     /// Subscribe to job feedback for requests we've made.
-    pub async fn subscribe_to_feedback(&self) -> Result<mpsc::Receiver<JobFeedback>> {
+    ///
+    /// Returns a [`Subscription`] that yields feedback via `.recv()`.
+    /// Call `.cancel()` to abort the background task, or drop the subscription.
+    ///
+    /// **Backpressure:** The internal channel holds 256 items. If the receiver
+    /// is not drained fast enough, the sending task blocks until space is available.
+    pub async fn subscribe_to_feedback(&self) -> Result<Subscription<JobFeedback>> {
         let (tx, rx) = mpsc::channel(256);
 
         // Filter by #p tag — feedback events are tagged with the customer's pubkey
@@ -219,7 +232,7 @@ impl MarketplaceService {
         self.client.subscribe(vec![filter], None).await?;
 
         let client = self.client.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut notifications = client.notifications();
             let mut seen = BoundedDedup::new(DEDUP_CAPACITY);
             while let Some(notification) = recv_notification(&mut notifications).await {
@@ -239,7 +252,7 @@ impl MarketplaceService {
             tracing::warn!("subscription task ended: feedback (notification channel closed)");
         });
 
-        Ok(rx)
+        Ok(Subscription::new(rx, handle))
     }
 
     // ── Provider API ──
@@ -249,12 +262,29 @@ impl MarketplaceService {
     /// Receives both directed requests (tagged with our pubkey) and broadcast
     /// requests (no `#p` tag). Requests directed at other providers are filtered out.
     ///
+    /// Two overlapping filters are sent to the relay (directed + broadcast).
+    /// The same event may arrive twice from a single relay; [`BoundedDedup`]
+    /// deduplicates by event ID so each request is delivered exactly once.
+    ///
     /// Events that cannot be parsed (e.g., missing `["i", ...]` tag) are silently
     /// dropped — only well-formed NIP-90 job requests are forwarded to the receiver.
+    ///
+    /// **Broadcast filter trade-off:** The broadcast filter subscribes to all job
+    /// requests of the given kinds without a pubkey filter. On a busy network this
+    /// means the relay sends every matching event, even those directed at other
+    /// providers (which are discarded client-side). This is intentional — it's the
+    /// only way to receive undirected/broadcast jobs. If your agent only handles
+    /// directed requests, subscribe with a pubkey filter via the Nostr client directly.
+    ///
+    /// Returns a [`Subscription`] that yields requests via `.recv()`.
+    /// Call `.cancel()` to abort the background task, or drop the subscription.
+    ///
+    /// **Backpressure:** The internal channel holds 256 items. If the receiver
+    /// is not drained fast enough, the sending task blocks until space is available.
     pub async fn subscribe_to_job_requests(
         &self,
         kind_offsets: &[u16],
-    ) -> Result<mpsc::Receiver<JobRequest>> {
+    ) -> Result<Subscription<JobRequest>> {
         let (tx, rx) = mpsc::channel(256);
 
         let kinds: Vec<Kind> = kind_offsets
@@ -284,7 +314,7 @@ impl MarketplaceService {
             .await?;
 
         let client = self.client.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut notifications = client.notifications();
             let mut seen = BoundedDedup::new(DEDUP_CAPACITY);
             while let Some(notification) = recv_notification(&mut notifications).await {
@@ -327,7 +357,7 @@ impl MarketplaceService {
             tracing::warn!("subscription task ended: job_requests (notification channel closed)");
         });
 
-        Ok(rx)
+        Ok(Subscription::new(rx, handle))
     }
 
     /// Submit a job result (kind:6000+offset).
@@ -371,6 +401,9 @@ impl MarketplaceService {
     /// When `status` is `PaymentRequired`, pass the payment amount in
     /// `amount` and the payment request string in `payment_request` to produce
     /// a correct `["amount", amount, request]` or `["amount", amount, request, chain]` tag per NIP-90.
+    ///
+    /// `amount` is in the chain's base unit: millisatoshis for Lightning,
+    /// lamports for Solana. The value is serialized as-is into the NIP-90 tag.
     ///
     /// The optional `payment_chain` identifies the payment network (e.g., "lightning", "solana").
     /// If omitted, "lightning" is assumed for backward compatibility.
@@ -416,6 +449,11 @@ impl MarketplaceService {
 }
 
 // ── Parsing helpers ──
+//
+// Note on signature verification: `nostr_sdk` verifies event signatures
+// before delivering them via `RelayPoolNotification::Event`. Events that
+// fail signature verification are rejected at the relay-pool layer and
+// never reach these parse functions.
 
 fn get_tag_value(event: &Event, tag_name: &str) -> Option<String> {
     event.tags.iter().find_map(|tag| {
@@ -481,6 +519,9 @@ fn parse_job_request(event: &Event) -> Option<JobRequest> {
     let output_mime = get_tag_value(event, "output");
     let tags = get_tag_values(event, "t");
 
+    // Performance: cloning Event here is acceptable — it happens once per
+    // parsed job request, and the clone is needed so callers can reference
+    // the original event for replies (feedback, results).
     Some(JobRequest {
         event_id: event.id,
         customer: event.pubkey,
