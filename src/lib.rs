@@ -12,7 +12,7 @@
 //! - **Marketplace** — submit and receive jobs using NIP-90 Data Vending Machines
 //! - **Messaging** — encrypted private messages via NIP-17 (NIP-44 + NIP-59 gift wrap)
 //! - **Payments** — pluggable payment providers via the [`PaymentProvider`] trait.
-//!   Built-in: Lightning via LDK-node (feature-gated behind `payments-ldk`)
+//!   Built-in: Lightning via LDK-node (`payments-ldk`), Solana (`payments-solana`)
 //!
 //! ## Quick Start
 //!
