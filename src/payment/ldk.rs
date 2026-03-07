@@ -22,7 +22,9 @@ pub struct LdkPaymentConfig {
 impl Default for LdkPaymentConfig {
     fn default() -> Self {
         Self {
-            storage_dir: "/tmp/elisym-ldk".to_string(),
+            storage_dir: dirs::home_dir()
+                .map(|h| h.join(".elisym").join("ldk").to_string_lossy().into_owned())
+                .unwrap_or_else(|| "/tmp/elisym-ldk".to_string()),
             network: ldk_node::bitcoin::Network::Bitcoin,
             esplora_url: DEFAULT_ESPLORA_URL.to_string(),
             listening_address: None,
