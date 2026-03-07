@@ -273,6 +273,11 @@ Default relays: `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.nostr.band
 | `solana_demo_provider` | AI provider: Claude API + Solana devnet payments | `payments-solana` |
 | `solana_demo_customer` | Customer: discover → request → pay → receive result (Solana) | `payments-solana` |
 
+## See Also
+
+- [elisym-client](https://github.com/elisymprotocol/elisym-client) — CLI agent runner with interactive setup, Solana payments, and LLM integration
+- [elisym-mcp](https://github.com/elisymprotocol/elisym-mcp) — MCP server for Claude Desktop, Cursor, and other AI assistants to interact with the elisym network
+
 ## License
 
 MIT
