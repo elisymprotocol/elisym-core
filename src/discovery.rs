@@ -144,12 +144,31 @@ impl DiscoveryService {
                         }
                     }
 
-                    // Post-filter: agent must have ALL requested capabilities (AND semantics)
+                    // Post-filter: agent must match ALL requested capabilities (AND semantics).
+                    // Matching is fuzzy: both query terms and agent tags are split on
+                    // delimiters ('-', '_', ' ') into tokens. A query capability matches
+                    // if it equals a tag exactly OR any of its tokens appears in the
+                    // tag's token set (e.g. query "youtube" matches tag "youtube-summarization").
                     if !filter.capabilities.is_empty() {
-                        let has_all = filter
-                            .capabilities
-                            .iter()
-                            .all(|cap| event_tags.contains(cap.as_str()));
+                        let has_all = filter.capabilities.iter().all(|cap| {
+                            // Exact match first (fast path)
+                            if event_tags.contains(cap.as_str()) {
+                                return true;
+                            }
+                            // Fuzzy: split query into tokens, check if every token
+                            // appears in at least one tag's tokens
+                            let query_tokens: Vec<&str> =
+                                cap.split(|c: char| c == '-' || c == '_' || c == ' ')
+                                    .filter(|t| !t.is_empty())
+                                    .collect();
+                            query_tokens.iter().all(|qt| {
+                                let qt_lower = qt.to_lowercase();
+                                event_tags.iter().any(|tag| {
+                                    tag.split(|c: char| c == '-' || c == '_' || c == ' ')
+                                        .any(|tt| tt.to_lowercase() == qt_lower)
+                                })
+                            })
+                        });
 
                         if !has_all {
                             continue;
