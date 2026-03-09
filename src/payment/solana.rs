@@ -36,7 +36,7 @@ impl SolanaNetwork {
     /// Default RPC URL for this network.
     pub fn rpc_url(&self) -> String {
         match self {
-            SolanaNetwork::Mainnet => "https://api.mainnet-beta.solana.com".to_string(),
+            SolanaNetwork::Mainnet => "https://api.mainnet.solana.com".to_string(),
             SolanaNetwork::Devnet => "https://api.devnet.solana.com".to_string(),
             SolanaNetwork::Testnet => "https://api.testnet.solana.com".to_string(),
             SolanaNetwork::Custom(url) => url.clone(),
@@ -672,7 +672,7 @@ mod tests {
     fn test_network_rpc_urls() {
         assert_eq!(
             SolanaNetwork::Mainnet.rpc_url(),
-            "https://api.mainnet-beta.solana.com"
+            "https://api.mainnet.solana.com"
         );
         assert_eq!(
             SolanaNetwork::Devnet.rpc_url(),
