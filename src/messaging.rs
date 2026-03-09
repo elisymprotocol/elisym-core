@@ -68,11 +68,14 @@ impl MessagingService {
             .kind(Kind::GiftWrap)
             .pubkey(self.identity.public_key())
             .since(since);
+        // Create the broadcast receiver BEFORE subscribing, so no events
+        // arriving between subscribe() and spawn() are lost.
+        let mut notifications = self.client.notifications();
+
         self.client.subscribe(vec![filter], None).await?;
 
         let client = self.client.clone();
         let handle = tokio::spawn(async move {
-            let mut notifications = client.notifications();
             let mut seen = BoundedDedup::new(DEDUP_CAPACITY);
             while let Some(notification) = recv_notification(&mut notifications).await {
                 if let RelayPoolNotification::Event { event, .. } = notification {

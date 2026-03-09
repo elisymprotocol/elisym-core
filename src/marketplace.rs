@@ -174,12 +174,14 @@ impl MarketplaceService {
             )
             .since(Timestamp::now());
 
+        // Create the broadcast receiver BEFORE subscribing, so no events
+        // arriving between subscribe() and spawn() are lost.
+        let mut notifications = self.client.notifications();
+
         self.client.subscribe(vec![filter], None).await?;
 
-        let client = self.client.clone();
         let allowed: Vec<PublicKey> = expected_providers.to_vec();
         let handle = tokio::spawn(async move {
-            let mut notifications = client.notifications();
             let mut seen = BoundedDedup::new(DEDUP_CAPACITY);
             while let Some(notification) = recv_notification(&mut notifications).await {
                 if let RelayPoolNotification::Event { event, .. } = notification {
@@ -229,11 +231,13 @@ impl MarketplaceService {
             )
             .since(Timestamp::now());
 
+        // Create the broadcast receiver BEFORE subscribing, so no events
+        // arriving between subscribe() and spawn() are lost.
+        let mut notifications = self.client.notifications();
+
         self.client.subscribe(vec![filter], None).await?;
 
-        let client = self.client.clone();
         let handle = tokio::spawn(async move {
-            let mut notifications = client.notifications();
             let mut seen = BoundedDedup::new(DEDUP_CAPACITY);
             while let Some(notification) = recv_notification(&mut notifications).await {
                 if let RelayPoolNotification::Event { event, .. } = notification {
@@ -309,13 +313,15 @@ impl MarketplaceService {
             .kinds(kinds)
             .since(Timestamp::now());
 
+        // Create the broadcast receiver BEFORE subscribing, so no events
+        // arriving between subscribe() and spawn() are lost.
+        let mut notifications = self.client.notifications();
+
         self.client
             .subscribe(vec![filter_directed, filter_broadcast], None)
             .await?;
 
-        let client = self.client.clone();
         let handle = tokio::spawn(async move {
-            let mut notifications = client.notifications();
             let mut seen = BoundedDedup::new(DEDUP_CAPACITY);
             while let Some(notification) = recv_notification(&mut notifications).await {
                 if let RelayPoolNotification::Event { event, .. } = notification {
