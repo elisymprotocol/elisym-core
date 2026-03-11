@@ -192,6 +192,16 @@ impl SolanaPaymentProvider {
         self.keypair.pubkey().to_string()
     }
 
+    /// Get the configured Solana network name (e.g. "devnet", "mainnet").
+    pub fn network_name(&self) -> &str {
+        match &self.config.network {
+            SolanaNetwork::Mainnet => "mainnet",
+            SolanaNetwork::Devnet => "devnet",
+            SolanaNetwork::Testnet => "testnet",
+            SolanaNetwork::Custom(_) => "custom",
+        }
+    }
+
     /// Get the SOL balance in lamports.
     pub fn balance(&self) -> Result<u64> {
         self.rpc_client

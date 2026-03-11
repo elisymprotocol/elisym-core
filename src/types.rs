@@ -16,9 +16,6 @@ pub const KIND_JOB_FEEDBACK: u16 = 7000;
 /// Default NIP-90 job kind offset (request kind = 5000 + offset, result kind = 6000 + offset)
 pub const DEFAULT_KIND_OFFSET: u16 = 100;
 
-/// Protocol version identifier
-pub const PROTOCOL_VERSION: &str = "elisym/0.1";
-
 /// Default relays for the network
 pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
@@ -52,6 +49,7 @@ pub fn job_result_kind(offset: u16) -> Option<Kind> {
 #[serde(rename_all = "kebab-case")]
 pub enum JobStatus {
     PaymentRequired,
+    PaymentCompleted,
     Processing,
     Error,
     Success,
@@ -62,6 +60,7 @@ impl JobStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             JobStatus::PaymentRequired => "payment-required",
+            JobStatus::PaymentCompleted => "payment-completed",
             JobStatus::Processing => "processing",
             JobStatus::Error => "error",
             JobStatus::Success => "success",

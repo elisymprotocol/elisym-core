@@ -42,7 +42,7 @@ pub(crate) mod dedup;
 
 pub use error::{ElisymError, Result};
 pub use types::*;
-pub use identity::{AgentIdentity, CapabilityCard};
+pub use identity::{AgentIdentity, CapabilityCard, PaymentInfo};
 pub use discovery::{DiscoveryService, DiscoveredAgent, AgentFilter};
 pub use messaging::MessagingService;
 pub use marketplace::{MarketplaceService, JobRequest, JobResult, JobFeedback};
@@ -104,7 +104,7 @@ pub use payment::ldk::{LdkPaymentProvider, LdkPaymentConfig, ChannelInfo};
 pub use payment::solana::{SolanaPaymentProvider, SolanaPaymentConfig, SolanaNetwork};
 
 use std::sync::Arc;
-use nostr_sdk::Client;
+use nostr_sdk::{Client, Metadata, Url};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -470,6 +470,24 @@ impl AgentNodeBuilder {
                 total = self.relays.len(),
                 "Connected to relays"
             );
+        }
+
+        // Publish NIP-01 kind:0 profile metadata (name, about, picture)
+        {
+            let pubkey_hex = identity.public_key().to_hex();
+            let picture_url = format!("https://robohash.org/{}", pubkey_hex);
+            let metadata = Metadata::new()
+                .name(&self.name)
+                .about(&self.description)
+                .picture(Url::parse(&picture_url).expect("valid robohash URL"));
+            match client.set_metadata(&metadata).await {
+                Ok(output) => {
+                    tracing::info!(event_id = %output.val, "Published Nostr profile (kind:0)");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to publish Nostr profile, continuing");
+                }
+            }
         }
 
         // Create services

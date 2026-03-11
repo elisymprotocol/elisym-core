@@ -1,9 +1,7 @@
 use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::error::{ElisymError, Result};
-use crate::types::PROTOCOL_VERSION;
 
 /// Wrapper around nostr_sdk::Keys providing agent identity management.
 #[derive(Debug, Clone)]
@@ -51,6 +49,20 @@ impl AgentIdentity {
     }
 }
 
+/// Payment configuration for an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentInfo {
+    /// Payment chain (e.g. "solana", "lightning").
+    pub chain: String,
+    /// Network within the chain (e.g. "devnet", "mainnet").
+    pub network: String,
+    /// On-chain address for receiving payments.
+    pub address: String,
+    /// Price per job in base units (lamports for Solana, msats for Lightning).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_price: Option<u64>,
+}
+
 /// Describes an agent's capabilities, published as NIP-89 event content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityCard {
@@ -58,11 +70,7 @@ pub struct CapabilityCard {
     pub description: String,
     pub capabilities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(alias = "lightning_address")]
-    pub payment_address: Option<String>,
-    pub protocol_version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Value>,
+    pub payment: Option<PaymentInfo>,
 }
 
 impl CapabilityCard {
@@ -75,14 +83,12 @@ impl CapabilityCard {
             name: name.into(),
             description: description.into(),
             capabilities,
-            payment_address: None,
-            protocol_version: PROTOCOL_VERSION.to_string(),
-            metadata: None,
+            payment: None,
         }
     }
 
-    pub fn set_payment_address(&mut self, address: impl Into<String>) {
-        self.payment_address = Some(address.into());
+    pub fn set_payment(&mut self, payment: PaymentInfo) {
+        self.payment = Some(payment);
     }
 
     pub fn to_json(&self) -> Result<String> {
@@ -95,12 +101,6 @@ impl CapabilityCard {
             return Err(ElisymError::InvalidCapabilityCard(
                 "name is required".into(),
             ));
-        }
-        if !card.protocol_version.starts_with("elisym/") {
-            return Err(ElisymError::InvalidCapabilityCard(format!(
-                "unsupported protocol version: {}",
-                card.protocol_version
-            )));
         }
         Ok(card)
     }
@@ -127,27 +127,35 @@ mod tests {
     #[test]
     fn test_capability_card_serde() {
         let mut card = CapabilityCard::new("test-agent", "A test agent", vec!["translation".into()]);
-        card.set_payment_address("agent@wallet.com");
+        card.set_payment(PaymentInfo {
+            chain: "solana".into(),
+            network: "devnet".into(),
+            address: "So1anaAddr...".into(),
+            job_price: Some(10_000_000),
+        });
 
         let json = card.to_json().unwrap();
         let parsed = CapabilityCard::from_json(&json).unwrap();
 
         assert_eq!(parsed.name, "test-agent");
         assert_eq!(parsed.capabilities, vec!["translation"]);
-        assert_eq!(parsed.payment_address.as_deref(), Some("agent@wallet.com"));
-        assert_eq!(parsed.protocol_version, PROTOCOL_VERSION);
+        let payment = parsed.payment.unwrap();
+        assert_eq!(payment.chain, "solana");
+        assert_eq!(payment.network, "devnet");
+        assert_eq!(payment.address, "So1anaAddr...");
+        assert_eq!(payment.job_price, Some(10_000_000));
     }
 
     #[test]
     fn test_capability_card_empty_name_fails() {
-        let json = r#"{"name":"","description":"x","capabilities":[],"protocol_version":"elisym/0.1"}"#;
+        let json = r#"{"name":"","description":"x","capabilities":[]}"#;
         assert!(CapabilityCard::from_json(json).is_err());
     }
 
     #[test]
-    fn test_capability_card_invalid_protocol_version_fails() {
-        let json = r#"{"name":"test","description":"x","capabilities":[],"protocol_version":"unknown/1.0"}"#;
-        let err = CapabilityCard::from_json(json).unwrap_err();
-        assert!(err.to_string().contains("unsupported protocol version"));
+    fn test_capability_card_no_payment() {
+        let json = r#"{"name":"test","description":"x","capabilities":["summarization"]}"#;
+        let card = CapabilityCard::from_json(json).unwrap();
+        assert!(card.payment.is_none());
     }
 }

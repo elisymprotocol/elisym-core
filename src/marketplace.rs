@@ -52,6 +52,9 @@ pub struct JobFeedback {
     pub extra_info: Option<String>,
     pub payment_request: Option<String>,
     pub payment_chain: Option<String>,
+    /// Transaction hash/signature from a `["tx", hash, chain?]` tag.
+    /// Present when the customer confirms payment (status: `payment-completed`).
+    pub payment_hash: Option<String>,
     pub raw_event: Event,
 }
 
@@ -60,6 +63,7 @@ impl JobFeedback {
     pub fn parsed_status(&self) -> Option<crate::types::JobStatus> {
         match self.status.as_str() {
             "payment-required" => Some(crate::types::JobStatus::PaymentRequired),
+            "payment-completed" => Some(crate::types::JobStatus::PaymentCompleted),
             "processing" => Some(crate::types::JobStatus::Processing),
             "error" => Some(crate::types::JobStatus::Error),
             "success" => Some(crate::types::JobStatus::Success),
@@ -123,6 +127,12 @@ impl MarketplaceService {
         if let Some(pk) = provider {
             tags.push(Tag::public_key(*pk));
         }
+
+        // Always tag with elisym protocol identifier
+        tags.push(Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)),
+            vec!["elisym".to_string()],
+        ));
 
         for tag in &extra_tags {
             tags.push(Tag::custom(
@@ -385,6 +395,10 @@ impl MarketplaceService {
         let mut tags = vec![
             Tag::event(request_event.id),
             Tag::public_key(request_event.pubkey),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)),
+                vec!["elisym".to_string()],
+            ),
         ];
 
         if let Some(val) = amount {
@@ -425,6 +439,10 @@ impl MarketplaceService {
         let mut tags = vec![
             Tag::event(request_event.id),
             Tag::public_key(request_event.pubkey),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)),
+                vec!["elisym".to_string()],
+            ),
         ];
 
         let status_str = status.to_string();
@@ -450,6 +468,46 @@ impl MarketplaceService {
         let output = self.client.send_event_builder(builder).await?;
 
         tracing::info!(event_id = %output.val, status = %status, "Submitted job feedback");
+        Ok(output.val)
+    }
+
+    /// Submit a payment confirmation (kind:7000, status: `payment-completed`).
+    ///
+    /// Called by the **customer** after successfully paying a provider's payment request.
+    /// Publishes a `["tx", hash, chain]` tag so the provider (and any observer) can
+    /// verify the on-chain transaction that fulfils the job's payment requirement.
+    ///
+    /// The `["p", provider]` tag is set to the provider's pubkey so the provider's
+    /// feedback subscription picks it up.
+    pub async fn submit_payment_confirmation(
+        &self,
+        request_event_id: EventId,
+        provider: &PublicKey,
+        payment_hash: &str,
+        payment_chain: Option<&str>,
+    ) -> Result<EventId> {
+        let chain = payment_chain.unwrap_or("solana");
+
+        let tags = vec![
+            Tag::event(request_event_id),
+            Tag::public_key(*provider),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)),
+                vec!["elisym".to_string()],
+            ),
+            Tag::parse(["status", "payment-completed"])?,
+            Tag::parse(["tx", payment_hash, chain])?,
+        ];
+
+        let builder = EventBuilder::new(kind(KIND_JOB_FEEDBACK), "").tags(tags);
+        let output = self.client.send_event_builder(builder).await?;
+
+        tracing::info!(
+            event_id = %output.val,
+            tx = %payment_hash,
+            chain = %chain,
+            "Submitted payment confirmation"
+        );
         Ok(output.val)
     }
 }
@@ -597,6 +655,9 @@ fn parse_job_feedback(event: &Event) -> Option<JobFeedback> {
         })
         .unwrap_or((None, None));
 
+    // Extract transaction hash from ["tx", hash, chain?] tag (payment confirmation)
+    let payment_hash = get_tag_value(event, "tx");
+
     Some(JobFeedback {
         event_id: event.id,
         provider: event.pubkey,
@@ -605,6 +666,7 @@ fn parse_job_feedback(event: &Event) -> Option<JobFeedback> {
         extra_info,
         payment_request,
         payment_chain,
+        payment_hash,
         raw_event: event.clone(),
     })
 }
@@ -858,6 +920,23 @@ mod tests {
             Tag::parse(["status", "processing"]).unwrap(),
         ]);
         assert!(parse_job_feedback(&event).is_none());
+    }
+
+    #[test]
+    fn test_parse_job_feedback_payment_completed_with_tx() {
+        let request_event = make_event(5100, "", vec![
+            Tag::parse(["i", "data", "text"]).unwrap(),
+        ]);
+        let feedback_event = make_event(7000, "", vec![
+            Tag::event(request_event.id),
+            Tag::parse(["status", "payment-completed"]).unwrap(),
+            Tag::parse(["tx", "5UfDuX7WXYxRnFzCfQHs3a4jKj...", "solana"]).unwrap(),
+        ]);
+        let fb = parse_job_feedback(&feedback_event).expect("should parse");
+        assert_eq!(fb.status, "payment-completed");
+        assert_eq!(fb.parsed_status(), Some(JobStatus::PaymentCompleted));
+        assert_eq!(fb.payment_hash.as_deref(), Some("5UfDuX7WXYxRnFzCfQHs3a4jKj..."));
+        assert_eq!(fb.payment_request, None);
     }
 
     #[test]
