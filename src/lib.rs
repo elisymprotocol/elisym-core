@@ -327,6 +327,9 @@ pub struct AgentNodeBuilder {
     relays: Vec<String>,
     supported_job_kinds: Vec<u16>,
     secret_key: Option<String>,
+    /// When `true`, `build()` publishes the Nostr profile (kind:0) and
+    /// capability card (NIP-89) automatically. Default: `false`.
+    publish_on_build: bool,
     #[cfg(feature = "payments-ldk")]
     ldk_payment_config: Option<payment::ldk::LdkPaymentConfig>,
     #[cfg(feature = "payments-solana")]
@@ -342,6 +345,7 @@ impl AgentNodeBuilder {
             relays: DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect(),
             supported_job_kinds: vec![KIND_JOB_REQUEST_BASE + DEFAULT_KIND_OFFSET],
             secret_key: None,
+            publish_on_build: false,
             #[cfg(feature = "payments-ldk")]
             ldk_payment_config: None,
             #[cfg(feature = "payments-solana")]
@@ -376,6 +380,13 @@ impl AgentNodeBuilder {
     #[cfg(feature = "payments-ldk")]
     pub fn ldk_payment_config(mut self, config: payment::ldk::LdkPaymentConfig) -> Self {
         self.ldk_payment_config = Some(config);
+        self
+    }
+
+    /// Publish the Nostr profile and capability card automatically when
+    /// `build()` completes. Default: `false` (no auto-publish).
+    pub fn publish_on_build(mut self, yes: bool) -> Self {
+        self.publish_on_build = yes;
         self
     }
 
@@ -477,9 +488,9 @@ impl AgentNodeBuilder {
         let messaging = MessagingService::new(client.clone(), identity.clone());
         let marketplace = MarketplaceService::new(client.clone(), identity.clone());
 
-        // Publish profile and capability card in the background so build() returns fast.
-        // Failures are logged but do not prevent the agent from operating.
-        {
+        // Optionally publish profile and capability card in the background.
+        // Only runs when the caller explicitly opted in via `.publish_on_build(true)`.
+        if self.publish_on_build {
             let client_bg = client.clone();
             let name_bg = self.name.clone();
             let description_bg = self.description.clone();
