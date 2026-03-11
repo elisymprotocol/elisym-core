@@ -445,11 +445,11 @@ impl AgentNodeBuilder {
         }
         client.connect().await;
 
-        // Wait for at least one relay to connect (500ms polling, 15s max)
+        // Wait for at least one relay to connect (100ms polling, 15s max)
         let start = tokio::time::Instant::now();
         let connected_count;
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let relays = client.relays().await;
             let count = relays
                 .values()
@@ -472,34 +472,48 @@ impl AgentNodeBuilder {
             );
         }
 
-        // Publish NIP-01 kind:0 profile metadata (name, about, picture)
-        {
-            let pubkey_hex = identity.public_key().to_hex();
-            let picture_url = format!("https://robohash.org/{}", pubkey_hex);
-            let metadata = Metadata::new()
-                .name(&self.name)
-                .about(&self.description)
-                .picture(Url::parse(&picture_url).expect("valid robohash URL"));
-            match client.set_metadata(&metadata).await {
-                Ok(output) => {
-                    tracing::info!(event_id = %output.val, "Published Nostr profile (kind:0)");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to publish Nostr profile, continuing");
-                }
-            }
-        }
-
         // Create services
         let discovery = DiscoveryService::new(client.clone(), identity.clone());
         let messaging = MessagingService::new(client.clone(), identity.clone());
         let marketplace = MarketplaceService::new(client.clone(), identity.clone());
 
-        // Publish capability card (skip for customer-only agents with no capabilities)
-        if !self.capabilities.is_empty() {
-            discovery
-                .publish_capability(&card, &self.supported_job_kinds)
-                .await?;
+        // Publish profile and capability card in the background so build() returns fast.
+        // Failures are logged but do not prevent the agent from operating.
+        {
+            let client_bg = client.clone();
+            let name_bg = self.name.clone();
+            let description_bg = self.description.clone();
+            let pubkey_hex = identity.public_key().to_hex();
+            let discovery_bg = discovery.clone();
+            let card_bg = card.clone();
+            let capabilities_bg = self.capabilities.clone();
+            let job_kinds_bg = self.supported_job_kinds.clone();
+            tokio::spawn(async move {
+                // Publish NIP-01 kind:0 profile metadata (name, about, picture)
+                let picture_url = format!("https://robohash.org/{}", pubkey_hex);
+                let metadata = Metadata::new()
+                    .name(&name_bg)
+                    .about(&description_bg)
+                    .picture(Url::parse(&picture_url).expect("valid robohash URL"));
+                match client_bg.set_metadata(&metadata).await {
+                    Ok(output) => {
+                        tracing::info!(event_id = %output.val, "Published Nostr profile (kind:0)");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to publish Nostr profile, continuing");
+                    }
+                }
+
+                // Publish capability card (skip for customer-only agents with no capabilities)
+                if !capabilities_bg.is_empty() {
+                    if let Err(e) = discovery_bg
+                        .publish_capability(&card_bg, &job_kinds_bg)
+                        .await
+                    {
+                        tracing::warn!(error = %e, "Failed to publish capability card, continuing");
+                    }
+                }
+            });
         }
 
         tracing::info!(
