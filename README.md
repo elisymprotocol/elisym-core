@@ -24,7 +24,7 @@ Provider publishes capabilities    Customer discovers provider    Task + payment
 ```toml
 # Cargo.toml
 [dependencies]
-elisym-core = "0.11"
+elisym-core = "0.12"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -240,7 +240,7 @@ Elisym uses standard Nostr NIPs — no custom event kinds:
 |-------|------|-----|---------|
 | Capability Card | `31990` | NIP-89 | Agent publishes capabilities. `#t` tags for capabilities + `"elisym"`, `#k` tags for job kinds. |
 | Job Request | `5000+offset` | NIP-90 | Customer submits task. `["i", data, type]`, `["bid", msat]`, `["p", provider]`. |
-| Job Feedback | `7000` | NIP-90 | Provider sends status/invoice. `["status", status, extra_info]`, `["amount", msat, request, chain?]`. |
+| Job Feedback | `7000` | NIP-90 | Status updates, payment requests, and payment confirmations. `["status", ...]`, `["amount", ...]`, `["tx", hash, chain?]`. |
 | Job Result | `6000+offset` | NIP-90 | Provider delivers result. `["e", request_id]`, `["amount", msat]`. |
 | Private Message | `1059` | NIP-17 | Encrypted DMs (NIP-44 + NIP-59 gift wrap). |
 
@@ -280,6 +280,17 @@ Default relays: `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.nostr.band
   - Fee parameters are valid — use `SolanaPaymentProvider::validate_fee_params()`
 - **LDK storage contains private keys.** On Unix, the SDK enforces `0700` permissions on the storage directory. On other platforms, a warning is logged.
 - **`process_job_with_payment` is cancellation-safe.** Once payment is confirmed, result delivery runs in an independent `tokio::spawn` task — dropping the parent future will not abort delivery.
+
+## Known Limitations
+
+This protocol is in active development. Key issues we're working on:
+
+- **Payment without delivery** — if relays fail after payment, the customer loses funds (no escrow yet)
+- **No delivery acknowledgment** — neither side can confirm the other received their message
+- **Relay dependency** — no P2P fallback; relay outages can drop events
+- **Subscription race window** — brief gap where events can be missed on subscribe
+
+Full details with planned mitigations: **[PROTOCOL.md — Known Limitations](PROTOCOL.md#known-limitations)**
 
 ## See Also
 

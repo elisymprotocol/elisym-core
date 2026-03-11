@@ -71,6 +71,8 @@ pub struct CapabilityCard {
     pub capabilities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payment: Option<PaymentInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 impl CapabilityCard {
@@ -84,11 +86,16 @@ impl CapabilityCard {
             description: description.into(),
             capabilities,
             payment: None,
+            version: None,
         }
     }
 
     pub fn set_payment(&mut self, payment: PaymentInfo) {
         self.payment = Some(payment);
+    }
+
+    pub fn set_version(&mut self, version: impl Into<String>) {
+        self.version = Some(version.into());
     }
 
     pub fn to_json(&self) -> Result<String> {
