@@ -26,6 +26,9 @@ pub struct AgentFilter {
     /// Maximum number of agents to return. `None` means no limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// Free-text query to match against agent name and description (case-insensitive substring).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
 }
 
 /// Service for publishing and discovering agent capabilities via NIP-89.
@@ -146,9 +149,10 @@ impl DiscoveryService {
 
                     // Post-filter: agent must match ALL requested capabilities (AND semantics).
                     // Matching is fuzzy: both query terms and agent tags are split on
-                    // delimiters ('-', '_', ' ') into tokens. A query capability matches
-                    // if it equals a tag exactly OR any of its tokens appears in the
-                    // tag's token set (e.g. query "youtube" matches tag "youtube-summarization").
+                    // delimiters ('-', '_', ' ') into tokens. A query token matches a
+                    // tag token if they are equal OR one is a prefix of the other
+                    // (min 3 chars), so "stock" matches "stocks", "summarize" matches
+                    // "summarization", etc.
                     if !filter.capabilities.is_empty() {
                         let has_all = filter.capabilities.iter().all(|cap| {
                             // Exact match first (fast path)
@@ -165,12 +169,31 @@ impl DiscoveryService {
                                 let qt_lower = qt.to_lowercase();
                                 event_tags.iter().any(|tag| {
                                     tag.split(['-', '_', ' '])
-                                        .any(|tt| tt.to_lowercase() == qt_lower)
+                                        .any(|tt| {
+                                            let tt_lower = tt.to_lowercase();
+                                            tt_lower == qt_lower
+                                                || (qt_lower.len() >= 3 && tt_lower.starts_with(&qt_lower))
+                                                || (tt_lower.len() >= 3 && qt_lower.starts_with(&tt_lower))
+                                        })
                                 })
                             })
                         });
 
                         if !has_all {
+                            continue;
+                        }
+                    }
+
+                    // Post-filter: free-text query against name and description.
+                    if let Some(ref query) = filter.query {
+                        let q = query.to_lowercase();
+                        let name_lower = card.name.to_lowercase();
+                        let desc_lower = card.description.to_lowercase();
+                        let caps_lower: Vec<String> = card.capabilities.iter().map(|c| c.to_lowercase()).collect();
+                        let matches = name_lower.contains(&q)
+                            || desc_lower.contains(&q)
+                            || caps_lower.iter().any(|c| c.contains(&q));
+                        if !matches {
                             continue;
                         }
                     }
