@@ -269,6 +269,104 @@ impl MarketplaceService {
         Ok(Subscription::new(rx, handle))
     }
 
+    // ── History API ──
+
+    /// Fetch historical job requests submitted by this agent.
+    ///
+    /// Returns up to `limit` job requests of the given kind offsets,
+    /// ordered by the relay's response (typically newest first).
+    pub async fn fetch_my_jobs(
+        &self,
+        kind_offsets: &[u16],
+        limit: usize,
+    ) -> Result<Vec<JobRequest>> {
+        let kinds: Vec<Kind> = kind_offsets
+            .iter()
+            .filter_map(|offset| job_request_kind(*offset))
+            .collect();
+
+        let filter = Filter::new()
+            .kinds(kinds)
+            .author(self.identity.public_key())
+            .limit(limit);
+
+        let events = self
+            .client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await?;
+
+        let jobs: Vec<JobRequest> = events
+            .iter()
+            .filter_map(parse_job_request)
+            .collect();
+
+        Ok(jobs)
+    }
+
+    /// Fetch job results for a specific job request from relays.
+    ///
+    /// Queries relays for kind:6000+offset result events that reference the given
+    /// job request event ID and are tagged with the customer's pubkey.
+    pub async fn fetch_job_results(
+        &self,
+        job_event_id: EventId,
+        kind_offsets: &[u16],
+    ) -> Result<Vec<JobResult>> {
+        let kinds: Vec<Kind> = kind_offsets
+            .iter()
+            .filter_map(|offset| job_result_kind(*offset))
+            .collect();
+
+        let filter = Filter::new()
+            .kinds(kinds)
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::P),
+                vec![self.identity.public_key().to_hex()],
+            )
+            .event(job_event_id);
+
+        let events = self
+            .client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await?;
+
+        let results: Vec<JobResult> = events
+            .iter()
+            .filter_map(parse_job_result)
+            .collect();
+
+        Ok(results)
+    }
+
+    /// Fetch job feedback for a specific job request from relays.
+    ///
+    /// Queries relays for kind:7000 feedback events that reference the given
+    /// job request event ID and are tagged with the customer's pubkey.
+    pub async fn fetch_job_feedback(
+        &self,
+        job_event_id: EventId,
+    ) -> Result<Vec<JobFeedback>> {
+        let filter = Filter::new()
+            .kind(kind(KIND_JOB_FEEDBACK))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::P),
+                vec![self.identity.public_key().to_hex()],
+            )
+            .event(job_event_id);
+
+        let events = self
+            .client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await?;
+
+        let feedback: Vec<JobFeedback> = events
+            .iter()
+            .filter_map(parse_job_feedback)
+            .collect();
+
+        Ok(feedback)
+    }
+
     // ── Provider API ──
 
     /// Subscribe to incoming job requests for the given kind offsets.
