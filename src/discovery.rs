@@ -15,6 +15,8 @@ pub struct DiscoveredAgent {
     pub card: CapabilityCard,
     pub event_id: EventId,
     pub supported_kinds: Vec<u16>,
+    /// Number of requested capabilities that matched (for relevance sorting).
+    pub match_count: usize,
 }
 
 /// Filter for searching agents.
@@ -147,14 +149,17 @@ impl DiscoveryService {
                         }
                     }
 
-                    // Post-filter: agent must match ALL requested capabilities (AND semantics).
+                    // Post-filter: count how many requested capabilities match (OR with ranking).
+                    // Agents matching at least 1 capability are included; more matches = higher rank.
                     // Matching is fuzzy: both query terms and agent tags are split on
                     // delimiters ('-', '_', ' ') into tokens. A query token matches a
                     // tag token if they are equal OR one is a prefix of the other
                     // (min 3 chars), so "stock" matches "stocks", "summarize" matches
                     // "summarization", etc.
-                    if !filter.capabilities.is_empty() {
-                        let has_all = filter.capabilities.iter().all(|cap| {
+                    let match_count = if filter.capabilities.is_empty() {
+                        0
+                    } else {
+                        let count = filter.capabilities.iter().filter(|cap| {
                             // Exact match first (fast path)
                             if event_tags.contains(cap.as_str()) {
                                 return true;
@@ -177,12 +182,13 @@ impl DiscoveryService {
                                         })
                                 })
                             })
-                        });
+                        }).count();
 
-                        if !has_all {
+                        if count == 0 {
                             continue;
                         }
-                    }
+                        count
+                    };
 
                     // Post-filter: free-text query against name and description.
                     if let Some(ref query) = filter.query {
@@ -203,6 +209,7 @@ impl DiscoveryService {
                         card,
                         event_id: event.id,
                         supported_kinds,
+                        match_count,
                     });
                 }
                 Err(e) => {
@@ -213,6 +220,11 @@ impl DiscoveryService {
                     );
                 }
             }
+        }
+
+        // Sort by relevance: more capability matches first
+        if !filter.capabilities.is_empty() {
+            agents.sort_by(|a, b| b.match_count.cmp(&a.match_count));
         }
 
         if let Some(limit) = filter.limit {
