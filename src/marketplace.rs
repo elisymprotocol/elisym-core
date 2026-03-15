@@ -429,14 +429,30 @@ impl MarketplaceService {
             .subscribe(vec![filter_directed, filter_broadcast], None)
             .await?;
 
+        tracing::info!(
+            own_pubkey = %own_pubkey.to_hex(),
+            "Job request subscription started"
+        );
+
         let handle = tokio::spawn(async move {
             let mut seen = BoundedDedup::new(DEDUP_CAPACITY);
             while let Some(notification) = recv_notification(&mut notifications).await {
                 if let RelayPoolNotification::Event { event, .. } = notification {
+                    let kind_num = event.kind.as_u16();
+
+                    if (KIND_JOB_REQUEST_BASE..KIND_JOB_RESULT_BASE).contains(&kind_num) {
+                        tracing::debug!(
+                            event_id = %event.id,
+                            kind = kind_num,
+                            pubkey = %event.pubkey,
+                            "Received event in job request range"
+                        );
+                    }
+
                     if !seen.insert(event.id) {
+                        tracing::debug!(event_id = %event.id, "Skipping duplicate event");
                         continue; // duplicate from broadcast + directed filters or multiple relays
                     }
-                    let kind_num = event.kind.as_u16();
                     if (KIND_JOB_REQUEST_BASE..KIND_JOB_RESULT_BASE).contains(&kind_num) {
                         // Accept if: no #p tag (broadcast) or #p matches our pubkey.
                         // Reject if #p points to a different provider.
@@ -457,13 +473,29 @@ impl MarketplaceService {
                             && !p_tags.contains(&own_pubkey.to_hex());
 
                         if dominated {
+                            tracing::debug!(
+                                event_id = %event.id,
+                                p_tags = ?p_tags,
+                                own_pubkey = %own_pubkey.to_hex(),
+                                "Skipping job directed at another provider"
+                            );
                             continue;
                         }
 
                         if let Some(request) = parse_job_request(&event) {
+                            tracing::info!(
+                                event_id = %request.event_id,
+                                customer = %request.customer,
+                                "Forwarding job request to transport"
+                            );
                             if tx.send(request).await.is_err() {
                                 break;
                             }
+                        } else {
+                            tracing::warn!(
+                                event_id = %event.id,
+                                "Failed to parse job request from event"
+                            );
                         }
                     }
                 }

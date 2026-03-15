@@ -484,9 +484,17 @@ impl AgentNodeBuilder {
                 "No relays connected — cannot operate without at least one relay".into(),
             ));
         } else {
+            let connected_urls: Vec<String> = client
+                .relays()
+                .await
+                .iter()
+                .filter(|(_, r)| r.status() == nostr_sdk::RelayStatus::Connected)
+                .map(|(url, _)| url.to_string())
+                .collect();
             tracing::info!(
                 connected = connected_count,
                 total = self.relays.len(),
+                relays = ?connected_urls,
                 "Connected to relays"
             );
         }
