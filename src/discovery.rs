@@ -84,10 +84,12 @@ impl DiscoveryService {
 
         // Update kind:0 profile so name/description stay in sync with the capability card
         let picture_url = format!("https://robohash.org/{pubkey_hex}");
+        let about = format!("{} | Powered by elisym protocol", card.description);
         let metadata = Metadata::new()
             .name(&card.name)
-            .about(&card.description)
-            .picture(Url::parse(&picture_url).expect("valid robohash URL"));
+            .about(about)
+            .picture(Url::parse(&picture_url).expect("valid robohash URL"))
+            .website(Url::parse("https://elisym.network").expect("valid elisym URL"));
         match self.client.set_metadata(&metadata).await {
             Ok(meta_output) => {
                 tracing::info!(event_id = %meta_output.val, "Updated Nostr profile (kind:0)");
