@@ -388,7 +388,7 @@ impl SolanaPaymentProvider {
     ///
     /// This is a simple wallet-to-wallet transfer for user-initiated sends,
     /// bypassing the marketplace payment request flow.
-    pub fn send_transfer(&self, recipient: &str, lamports: u64) -> Result<String> {
+    pub fn transfer(&self, recipient: &str, lamports: u64) -> Result<String> {
         if lamports == 0 {
             return Err(ElisymError::Payment("Send amount must be greater than 0".into()));
         }
@@ -1601,43 +1601,43 @@ mod tests {
         assert!(!err_msg.contains("Fee"), "should pass fee: {}", err_msg);
     }
 
-    // ── send_transfer validation tests ──────────────────────────────
+    // ── transfer validation tests ─────────────────────────────────
 
     #[test]
-    fn test_send_transfer_zero_amount() {
+    fn test_transfer_zero_amount() {
         let keypair = Keypair::new();
         let provider = SolanaPaymentProvider::new(SolanaPaymentConfig::default(), keypair);
         let recipient = Keypair::new().pubkey().to_string();
-        let result = provider.send_transfer(&recipient, 0);
+        let result = provider.transfer(&recipient, 0);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("greater than 0"));
     }
 
     #[test]
-    fn test_send_transfer_below_rent_exempt() {
+    fn test_transfer_below_rent_exempt() {
         let keypair = Keypair::new();
         let provider = SolanaPaymentProvider::new(SolanaPaymentConfig::default(), keypair);
         let recipient = Keypair::new().pubkey().to_string();
-        let result = provider.send_transfer(&recipient, 100);
+        let result = provider.transfer(&recipient, 100);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("rent-exempt minimum"));
     }
 
     #[test]
-    fn test_send_transfer_invalid_recipient() {
+    fn test_transfer_invalid_recipient() {
         let keypair = Keypair::new();
         let provider = SolanaPaymentProvider::new(SolanaPaymentConfig::default(), keypair);
-        let result = provider.send_transfer("not-a-pubkey", 1_000_000_000);
+        let result = provider.transfer("not-a-pubkey", 1_000_000_000);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid Solana address"));
     }
 
     #[test]
-    fn test_send_transfer_self_send() {
+    fn test_transfer_self_send() {
         let keypair = Keypair::new();
         let own_address = keypair.pubkey().to_string();
         let provider = SolanaPaymentProvider::new(SolanaPaymentConfig::default(), keypair);
-        let result = provider.send_transfer(&own_address, 1_000_000_000);
+        let result = provider.transfer(&own_address, 1_000_000_000);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Cannot send SOL to your own address"));
     }
