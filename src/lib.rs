@@ -455,6 +455,24 @@ impl AgentNodeBuilder {
             None => AgentIdentity::generate(),
         };
 
+        // Build PaymentInfo from the configured payment provider (before moving it)
+        let payment_info = {
+            #[cfg(feature = "payments-solana")]
+            {
+                self.solana_payment_provider.as_ref().map(|p| PaymentInfo {
+                    chain: "solana".to_string(),
+                    network: p.network_name().to_string(),
+                    address: p.address(),
+                    job_price: None,
+                })
+            }
+            #[cfg(not(feature = "payments-solana"))]
+            { None::<PaymentInfo> }
+        };
+        let payment_info = payment_info.ok_or_else(|| {
+            ElisymError::Config("Payment provider is required to build an agent. Configure a Solana payment provider.".into())
+        })?;
+
         // Initialize payment provider (only one active at a time)
         let payments: Option<Arc<dyn PaymentProvider>> = {
             // Try LDK first
@@ -488,10 +506,12 @@ impl AgentNodeBuilder {
                 "No capabilities set — this agent will not be discoverable via search_agents()"
             );
         }
+
         let mut card = CapabilityCard::new(
             &self.name,
             &self.description,
             self.capabilities.clone(),
+            payment_info,
         );
         card.set_version(env!("CARGO_PKG_VERSION"));
 
