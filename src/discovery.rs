@@ -268,6 +268,7 @@ impl DiscoveryService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PaymentInfo;
 
     // ── matches_capability ──
 
@@ -333,27 +334,36 @@ mod tests {
 
     // ── matches_query ──
 
+    fn test_payment() -> crate::PaymentInfo {
+        PaymentInfo {
+            chain: "solana".into(),
+            network: "devnet".into(),
+            address: "So11111111111111111111111111111111111111112".into(),
+            job_price: None,
+        }
+    }
+
     #[test]
     fn test_query_matches_name() {
-        let card = CapabilityCard::new("Stock Analyzer", "Analyzes things", vec![]);
+        let card = CapabilityCard::new("Stock Analyzer", "Analyzes things", vec![], test_payment());
         assert!(matches_query("stock", &card));
     }
 
     #[test]
     fn test_query_matches_description() {
-        let card = CapabilityCard::new("Agent", "Translates text between languages", vec![]);
+        let card = CapabilityCard::new("Agent", "Translates text between languages", vec![], test_payment());
         assert!(matches_query("translates", &card));
     }
 
     #[test]
     fn test_query_matches_capability() {
-        let card = CapabilityCard::new("Agent", "Does stuff", vec!["summarization".into()]);
+        let card = CapabilityCard::new("Agent", "Does stuff", vec!["summarization".into()], test_payment());
         assert!(matches_query("summar", &card));
     }
 
     #[test]
     fn test_query_no_match() {
-        let card = CapabilityCard::new("Agent", "Does stuff", vec!["coding".into()]);
+        let card = CapabilityCard::new("Agent", "Does stuff", vec!["coding".into()], test_payment());
         assert!(!matches_query("translation", &card));
     }
 }
