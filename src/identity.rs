@@ -69,7 +69,8 @@ pub struct CapabilityCard {
     pub name: String,
     pub description: String,
     pub capabilities: Vec<String>,
-    pub payment: PaymentInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment: Option<PaymentInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
@@ -79,15 +80,18 @@ impl CapabilityCard {
         name: impl Into<String>,
         description: impl Into<String>,
         capabilities: Vec<String>,
-        payment: PaymentInfo,
     ) -> Self {
         Self {
             name: name.into(),
             description: description.into(),
             capabilities,
-            payment,
+            payment: None,
             version: None,
         }
+    }
+
+    pub fn set_payment(&mut self, payment: PaymentInfo) {
+        self.payment = Some(payment);
     }
 
     pub fn set_version(&mut self, version: impl Into<String>) {
@@ -121,39 +125,31 @@ mod tests {
         assert_eq!(id.public_key(), restored.public_key());
     }
 
-    fn test_payment() -> PaymentInfo {
-        PaymentInfo {
-            chain: "solana".into(),
-            network: "devnet".into(),
-            address: "So11111111111111111111111111111111111111112".into(),
-            job_price: Some(10_000_000),
-        }
-    }
-
     #[test]
     fn test_capability_card_serde() {
-        let card = CapabilityCard::new("test-agent", "A test agent", vec!["translation".into()], test_payment());
+        let mut card = CapabilityCard::new("test-agent", "A test agent", vec!["translation".into()]);
+        card.set_payment(PaymentInfo {
+            chain: "solana".into(),
+            network: "devnet".into(),
+            address: "So1anaAddr...".into(),
+            job_price: Some(10_000_000),
+        });
 
         let json = card.to_json().unwrap();
         let parsed = CapabilityCard::from_json(&json).unwrap();
 
         assert_eq!(parsed.name, "test-agent");
         assert_eq!(parsed.capabilities, vec!["translation"]);
-        assert_eq!(parsed.payment.chain, "solana");
-        assert_eq!(parsed.payment.network, "devnet");
-        assert_eq!(parsed.payment.address, "So11111111111111111111111111111111111111112");
-        assert_eq!(parsed.payment.job_price, Some(10_000_000));
+        let payment = parsed.payment.unwrap();
+        assert_eq!(payment.chain, "solana");
+        assert_eq!(payment.network, "devnet");
+        assert_eq!(payment.address, "So1anaAddr...");
+        assert_eq!(payment.job_price, Some(10_000_000));
     }
 
     #[test]
     fn test_capability_card_empty_name_fails() {
-        let json = r#"{"name":"","description":"x","capabilities":[],"payment":{"chain":"solana","network":"devnet","address":"addr"}}"#;
-        assert!(CapabilityCard::from_json(json).is_err());
-    }
-
-    #[test]
-    fn test_capability_card_missing_payment_fails() {
-        let json = r#"{"name":"test","description":"x","capabilities":[]}"#;
+        let json = r#"{"name":"","description":"x","capabilities":[]}"#;
         assert!(CapabilityCard::from_json(json).is_err());
     }
 
@@ -168,7 +164,7 @@ mod tests {
     #[test]
     fn test_capability_card_from_json_extra_fields() {
         // Forward compat: unknown fields should be silently ignored
-        let json = r#"{"name":"test","description":"x","capabilities":[],"payment":{"chain":"solana","network":"devnet","address":"addr"},"future_field":"val"}"#;
+        let json = r#"{"name":"test","description":"x","capabilities":[],"future_field":"val"}"#;
         let card = CapabilityCard::from_json(json).unwrap();
         assert_eq!(card.name, "test");
     }

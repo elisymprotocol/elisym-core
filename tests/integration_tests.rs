@@ -1,14 +1,5 @@
 use elisym_core::*;
 
-fn test_payment() -> PaymentInfo {
-    PaymentInfo {
-        chain: "solana".into(),
-        network: "devnet".into(),
-        address: "So11111111111111111111111111111111111111112".into(),
-        job_price: None,
-    }
-}
-
 #[test]
 fn test_identity_generate_and_restore() {
     let id = AgentIdentity::generate();
@@ -19,12 +10,17 @@ fn test_identity_generate_and_restore() {
 
 #[test]
 fn test_capability_card_roundtrip() {
-    let card = CapabilityCard::new(
+    let mut card = CapabilityCard::new(
         "test-agent",
         "A test agent for integration testing",
         vec!["capability-a".into(), "capability-b".into()],
-        test_payment(),
     );
+    card.set_payment(PaymentInfo {
+        chain: "solana".into(),
+        network: "devnet".into(),
+        address: "test@wallet.example.com".into(),
+        job_price: None,
+    });
 
     let json = card.to_json().unwrap();
     let restored = CapabilityCard::from_json(&json).unwrap();
@@ -32,14 +28,22 @@ fn test_capability_card_roundtrip() {
     assert_eq!(restored.name, "test-agent");
     assert_eq!(restored.description, "A test agent for integration testing");
     assert_eq!(restored.capabilities.len(), 2);
-    assert_eq!(restored.payment.address, "So11111111111111111111111111111111111111112");
-    assert_eq!(restored.payment.chain, "solana");
+    let payment = restored.payment.unwrap();
+    assert_eq!(payment.address, "test@wallet.example.com");
+    assert_eq!(payment.chain, "solana");
 }
 
 #[test]
-fn test_capability_card_missing_payment_fails() {
-    let json = r#"{"name":"minimal","description":"Minimal agent","capabilities":[]}"#;
-    assert!(CapabilityCard::from_json(json).is_err());
+fn test_capability_card_without_optional_fields() {
+    let card = CapabilityCard::new("minimal", "Minimal agent", vec![]);
+    let json = card.to_json().unwrap();
+
+    // payment should not be in JSON when None
+    assert!(!json.contains("payment"));
+
+    let restored = CapabilityCard::from_json(&json).unwrap();
+    assert_eq!(restored.name, "minimal");
+    assert!(restored.payment.is_none());
 }
 
 #[test]
@@ -80,10 +84,11 @@ fn test_kind_constants() {
 
 #[test]
 fn test_capability_card_with_payment() {
-    let card = CapabilityCard::new("sol-agent", "Agent with payment", vec![], PaymentInfo {
-        chain: "solana".into(),
-        network: "devnet".into(),
-        address: "So11111111111111111111111111111111111111113".into(),
+    let mut card = CapabilityCard::new("ln-agent", "Agent with payment", vec![]);
+    card.set_payment(PaymentInfo {
+        chain: "lightning".into(),
+        network: "mainnet".into(),
+        address: "agent@wallet.com".into(),
         job_price: Some(1000),
     });
 
@@ -91,7 +96,8 @@ fn test_capability_card_with_payment() {
     assert!(json.contains("payment"));
 
     let restored = CapabilityCard::from_json(&json).unwrap();
-    assert_eq!(restored.payment.address, "So11111111111111111111111111111111111111113");
-    assert_eq!(restored.payment.chain, "solana");
-    assert_eq!(restored.payment.job_price, Some(1000));
+    let payment = restored.payment.unwrap();
+    assert_eq!(payment.address, "agent@wallet.com");
+    assert_eq!(payment.chain, "lightning");
+    assert_eq!(payment.job_price, Some(1000));
 }
