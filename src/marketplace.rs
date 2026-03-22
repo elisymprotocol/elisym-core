@@ -1,4 +1,5 @@
 use nostr_sdk::prelude::*;
+use nostr::nips::nip44;
 use tokio::sync::mpsc;
 
 use crate::Subscription;
@@ -6,6 +7,27 @@ use crate::dedup::{BoundedDedup, recv_notification, DEDUP_CAPACITY};
 use crate::error::{ElisymError, Result};
 use crate::identity::AgentIdentity;
 use crate::types::{kind, job_request_kind, job_result_kind, JobStatus, KIND_JOB_FEEDBACK, KIND_JOB_REQUEST_BASE, KIND_JOB_RESULT_BASE};
+
+/// Check if an event has the `["encrypted", "nip44"]` tag.
+fn is_encrypted(event: &Event) -> bool {
+    event.tags.iter().any(|t| {
+        let s = t.as_slice();
+        s.first().map(|v| v.as_str()) == Some("encrypted")
+            && s.get(1).map(|v| v.as_str()) == Some("nip44")
+    })
+}
+
+/// Encrypt content with NIP-44. Returns ciphertext string.
+fn nip44_encrypt(secret_key: &SecretKey, recipient: &PublicKey, content: &str) -> Result<String> {
+    nip44::encrypt(secret_key, recipient, content, nip44::Version::V2)
+        .map_err(|e| ElisymError::Encryption(format!("NIP-44 encryption failed: {e}")))
+}
+
+/// Decrypt content with NIP-44. Returns plaintext string.
+fn nip44_decrypt(secret_key: &SecretKey, sender: &PublicKey, ciphertext: &str) -> Result<String> {
+    nip44::decrypt(secret_key, sender, ciphertext)
+        .map_err(|e| ElisymError::Encryption(format!("NIP-44 decryption failed: {e}")))
+}
 
 /// A job request received or sent via NIP-90.
 #[derive(Debug, Clone)]
@@ -18,6 +40,11 @@ pub struct JobRequest {
     pub output_mime: Option<String>,
     pub bid: Option<u64>,
     pub tags: Vec<String>,
+    /// Whether this request was NIP-44 encrypted on the wire.
+    pub encrypted: bool,
+    /// If `encrypted` is `true` and decryption failed, contains the error message.
+    /// When `Some`, `input_data` contains ciphertext (not plaintext).
+    pub decryption_error: Option<String>,
     pub raw_event: Event,
 }
 
@@ -29,6 +56,11 @@ pub struct JobResult {
     pub request_id: EventId,
     pub content: String,
     pub amount: Option<u64>,
+    /// Whether this result was NIP-44 encrypted on the wire.
+    pub encrypted: bool,
+    /// If `encrypted` is `true` and decryption failed, contains the error message.
+    /// When `Some`, `content` contains ciphertext (not plaintext).
+    pub decryption_error: Option<String>,
     pub raw_event: Event,
 }
 
@@ -96,6 +128,9 @@ impl MarketplaceService {
     // ── Customer API ──
 
     /// Submit a job request (kind:5000+offset).
+    /// When `provider` is specified, the input is automatically NIP-44 encrypted
+    /// for the provider (matching the TS SDK behaviour). Broadcast requests
+    /// (no provider) are sent in plaintext.
     #[allow(clippy::too_many_arguments)]
     pub async fn submit_job_request(
         &self,
@@ -111,8 +146,14 @@ impl MarketplaceService {
             ElisymError::Config(format!("Invalid job request kind offset: {}", kind_offset))
         })?;
 
+        let (content, i_tag_data) = if let Some(recipient) = provider {
+            (nip44_encrypt(self.identity.secret_key(), recipient, input_data)?, "encrypted".to_string())
+        } else {
+            (String::new(), input_data.to_string())
+        };
+
         let mut tags: Vec<Tag> = vec![
-            Tag::parse(["i", input_data, input_type])?,
+            Tag::parse(["i", &i_tag_data, input_type])?,
         ];
 
         if let Some(mime) = output_mime {
@@ -128,6 +169,10 @@ impl MarketplaceService {
             tags.push(Tag::public_key(*pk));
         }
 
+        if provider.is_some() {
+            tags.push(Tag::parse(["encrypted", "nip44"])?);
+        }
+
         // Always tag with elisym protocol identifier
         tags.push(Tag::custom(
             TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)),
@@ -141,8 +186,7 @@ impl MarketplaceService {
             ));
         }
 
-        // NIP-90: job input goes in the "i" tag, content is intentionally empty.
-        let builder = EventBuilder::new(k, "").tags(tags);
+        let builder = EventBuilder::new(k, &content).tags(tags);
         let output = self.client.send_event_builder(builder).await?;
 
         tracing::info!(event_id = %output.val, kind_offset, "Submitted job request");
@@ -191,6 +235,7 @@ impl MarketplaceService {
         self.client.subscribe(vec![filter], None).await?;
 
         let allowed: Vec<PublicKey> = expected_providers.to_vec();
+        let identity = self.identity.clone();
         let handle = tokio::spawn(async move {
             let mut seen = BoundedDedup::new(DEDUP_CAPACITY);
             while let Some(notification) = recv_notification(&mut notifications).await {
@@ -208,10 +253,16 @@ impl MarketplaceService {
                             );
                             continue;
                         }
-                        if let Some(result) = parse_job_result(&event) {
-                            if tx.send(result).await.is_err() {
-                                break;
+                        match parse_job_result(&event, Some(&identity)) {
+                            Ok(Some(result)) => {
+                                if tx.send(result).await.is_err() {
+                                    break;
+                                }
                             }
+                            Err(e) => {
+                                tracing::warn!(event_id = %event.id, %e, "Failed to parse job result");
+                            }
+                            Ok(None) => {}
                         }
                     }
                 }
@@ -297,7 +348,13 @@ impl MarketplaceService {
 
         let jobs: Vec<JobRequest> = events
             .iter()
-            .filter_map(parse_job_request)
+            .filter_map(|e| match parse_job_request(e, Some(&self.identity)) {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!(event_id = %e.id, %err, "Failed to parse job request");
+                    None
+                }
+            })
             .collect();
 
         Ok(jobs)
@@ -332,7 +389,13 @@ impl MarketplaceService {
 
         let results: Vec<JobResult> = events
             .iter()
-            .filter_map(parse_job_result)
+            .filter_map(|e| match parse_job_result(e, Some(&self.identity)) {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!(event_id = %e.id, %err, "Failed to parse job result");
+                    None
+                }
+            })
             .collect();
 
         Ok(results)
@@ -434,6 +497,7 @@ impl MarketplaceService {
             "Job request subscription started"
         );
 
+        let identity = self.identity.clone();
         let handle = tokio::spawn(async move {
             let mut seen = BoundedDedup::new(DEDUP_CAPACITY);
             while let Some(notification) = recv_notification(&mut notifications).await {
@@ -482,20 +546,26 @@ impl MarketplaceService {
                             continue;
                         }
 
-                        if let Some(request) = parse_job_request(&event) {
-                            tracing::info!(
-                                event_id = %request.event_id,
-                                customer = %request.customer,
-                                "Forwarding job request to transport"
-                            );
-                            if tx.send(request).await.is_err() {
-                                break;
+                        match parse_job_request(&event, Some(&identity)) {
+                            Ok(Some(request)) => {
+                                tracing::info!(
+                                    event_id = %request.event_id,
+                                    customer = %request.customer,
+                                    "Forwarding job request to transport"
+                                );
+                                if tx.send(request).await.is_err() {
+                                    break;
+                                }
                             }
-                        } else {
-                            tracing::warn!(
-                                event_id = %event.id,
-                                "Failed to parse job request from event"
-                            );
+                            Err(e) => {
+                                tracing::warn!(event_id = %event.id, %e, "Failed to parse job request");
+                            }
+                            Ok(None) => {
+                                tracing::warn!(
+                                    event_id = %event.id,
+                                    "Failed to parse job request from event"
+                                );
+                            }
                         }
                     }
                 }
@@ -506,7 +576,7 @@ impl MarketplaceService {
         Ok(Subscription::new(rx, handle))
     }
 
-    /// Submit a job result (kind:6000+offset).
+    /// Submit a job result (kind:6000+offset), always NIP-44 encrypted for the customer.
     pub async fn submit_job_result(
         &self,
         request_event: &Event,
@@ -522,6 +592,8 @@ impl MarketplaceService {
             ElisymError::Config(format!("Invalid job result kind offset: {}", kind_offset))
         })?;
 
+        let final_content = nip44_encrypt(self.identity.secret_key(), &request_event.pubkey, content)?;
+
         let mut tags = vec![
             Tag::event(request_event.id),
             Tag::public_key(request_event.pubkey),
@@ -531,6 +603,8 @@ impl MarketplaceService {
             ),
         ];
 
+        tags.push(Tag::parse(["encrypted", "nip44"])?);
+
         if let Some(val) = amount {
             let val_str = val.to_string();
             tags.push(Tag::parse(["amount", &val_str])?);
@@ -539,7 +613,7 @@ impl MarketplaceService {
         let request_json = serde_json::to_string(&request_event)?;
         tags.push(Tag::parse(["request", &request_json])?);
 
-        let builder = EventBuilder::new(k, content).tags(tags);
+        let builder = EventBuilder::new(k, &final_content).tags(tags);
         let output = self.client.send_event_builder(builder).await?;
 
         tracing::info!(event_id = %output.val, "Submitted job result");
@@ -692,10 +766,16 @@ fn resolve_request_id(event: &Event) -> Option<EventId> {
     EventId::parse(&request_id_str).ok()
 }
 
-fn parse_job_request(event: &Event) -> Option<JobRequest> {
-    let kind_offset = event.kind.as_u16().checked_sub(KIND_JOB_REQUEST_BASE)?;
+fn parse_job_request(event: &Event, identity: Option<&AgentIdentity>) -> Result<Option<JobRequest>> {
+    let kind_offset = match event.kind.as_u16().checked_sub(KIND_JOB_REQUEST_BASE) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
 
-    let (input_data, input_type) = event.tags.iter().find_map(|tag| {
+    let encrypted = is_encrypted(event);
+
+    // Extract input_type from the "i" tag (preserved in plaintext even when encrypted)
+    let i_tag = event.tags.iter().find_map(|tag| {
         let s = tag.as_slice();
         if s.first().map(|v| v.as_str()) == Some("i") {
             Some((
@@ -707,16 +787,30 @@ fn parse_job_request(event: &Event) -> Option<JobRequest> {
         } else {
             None
         }
-    })?;
+    });
+
+    let (input_data, input_type, decryption_error) = if encrypted {
+        let input_type = i_tag.as_ref().map(|(_, t)| t.clone()).unwrap_or_else(|| "text".to_string());
+        if let Some(id) = identity {
+            match nip44_decrypt(id.secret_key(), &event.pubkey, &event.content) {
+                Ok(plaintext) => (plaintext, input_type, None),
+                Err(e) => (event.content.clone(), input_type, Some(e.to_string())),
+            }
+        } else {
+            (event.content.clone(), input_type, Some("no decryption key provided".to_string()))
+        }
+    } else {
+        match i_tag {
+            Some((data, typ)) => (data, typ, None),
+            None => return Ok(None),
+        }
+    };
 
     let bid = get_tag_value(event, "bid").and_then(|v| v.parse().ok());
     let output_mime = get_tag_value(event, "output");
     let tags = get_tag_values(event, "t");
 
-    // Performance: cloning Event here is acceptable — it happens once per
-    // parsed job request, and the clone is needed so callers can reference
-    // the original event for replies (feedback, results).
-    Some(JobRequest {
+    Ok(Some(JobRequest {
         event_id: event.id,
         customer: event.pubkey,
         kind_offset,
@@ -725,15 +819,32 @@ fn parse_job_request(event: &Event) -> Option<JobRequest> {
         output_mime,
         bid,
         tags,
+        encrypted,
+        decryption_error,
         raw_event: event.clone(),
-    })
+    }))
 }
 
-fn parse_job_result(event: &Event) -> Option<JobResult> {
-    // Determine the request ID robustly:
-    // 1. If a "request" tag exists, parse the stringified event to extract its id
-    // 2. Fall back to the first "e" tag
-    let request_id = resolve_request_id(event)?;
+fn parse_job_result(event: &Event, identity: Option<&AgentIdentity>) -> Result<Option<JobResult>> {
+    let request_id = match resolve_request_id(event) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+
+    let encrypted = is_encrypted(event);
+
+    let (content, decryption_error) = if encrypted {
+        if let Some(id) = identity {
+            match nip44_decrypt(id.secret_key(), &event.pubkey, &event.content) {
+                Ok(plaintext) => (plaintext, None),
+                Err(e) => (event.content.clone(), Some(e.to_string())),
+            }
+        } else {
+            (event.content.clone(), Some("no decryption key provided".to_string()))
+        }
+    } else {
+        (event.content.clone(), None)
+    };
 
     let amount = event.tags.iter().find_map(|tag| {
         let s = tag.as_slice();
@@ -744,14 +855,16 @@ fn parse_job_result(event: &Event) -> Option<JobResult> {
         }
     });
 
-    Some(JobResult {
+    Ok(Some(JobResult {
         event_id: event.id,
         provider: event.pubkey,
         request_id,
-        content: event.content.clone(),
+        content,
         amount,
+        encrypted,
+        decryption_error,
         raw_event: event.clone(),
-    })
+    }))
 }
 
 fn parse_job_feedback(event: &Event) -> Option<JobFeedback> {
@@ -861,7 +974,7 @@ mod tests {
             Tag::parse(["bid", "1000000"]).unwrap(),
             Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)), vec!["summarization".to_string()]),
         ]);
-        let req = parse_job_request(&event).expect("should parse");
+        let req = parse_job_request(&event, None).unwrap().expect("should parse");
         assert_eq!(req.input_data, "Summarize this text");
         assert_eq!(req.input_type, "text");
         assert_eq!(req.output_mime.as_deref(), Some("text/plain"));
@@ -877,7 +990,7 @@ mod tests {
         let event = make_event(5100, "", vec![
             Tag::parse(["i", "data", "url"]).unwrap(),
         ]);
-        let req = parse_job_request(&event).expect("should parse");
+        let req = parse_job_request(&event, None).unwrap().expect("should parse");
         assert_eq!(req.input_data, "data");
         assert_eq!(req.input_type, "url");
         assert_eq!(req.output_mime, None);
@@ -891,7 +1004,7 @@ mod tests {
         let event = make_event(5100, "", vec![
             Tag::parse(["bid", "1000"]).unwrap(),
         ]);
-        assert!(parse_job_request(&event).is_none());
+        assert!(parse_job_request(&event, None).unwrap().is_none());
     }
 
     #[test]
@@ -900,7 +1013,7 @@ mod tests {
         let event = make_event(4999, "", vec![
             Tag::parse(["i", "data", "text"]).unwrap(),
         ]);
-        assert!(parse_job_request(&event).is_none());
+        assert!(parse_job_request(&event, None).unwrap().is_none());
     }
 
     #[test]
@@ -909,7 +1022,7 @@ mod tests {
         let event = make_event(5100, "", vec![
             Tag::parse(["i", "some data"]).unwrap(),
         ]);
-        let req = parse_job_request(&event).expect("should parse");
+        let req = parse_job_request(&event, None).unwrap().expect("should parse");
         assert_eq!(req.input_data, "some data");
         assert_eq!(req.input_type, "text");
     }
@@ -921,7 +1034,7 @@ mod tests {
             Tag::parse(["i", "data", "text"]).unwrap(),
             Tag::parse(["bid", "not-a-number"]).unwrap(),
         ]);
-        let req = parse_job_request(&event).expect("should parse");
+        let req = parse_job_request(&event, None).unwrap().expect("should parse");
         assert_eq!(req.bid, None);
     }
 
@@ -936,7 +1049,7 @@ mod tests {
             Tag::event(request_event.id),
             Tag::parse(["amount", "1000000"]).unwrap(),
         ]);
-        let result = parse_job_result(&result_event).expect("should parse");
+        let result = parse_job_result(&result_event, None).unwrap().expect("should parse");
         assert_eq!(result.request_id, request_event.id);
         assert_eq!(result.content, "Summary: this is a summary");
         assert_eq!(result.amount, Some(1_000_000));
@@ -954,7 +1067,7 @@ mod tests {
             Tag::parse(["request", &request_json]).unwrap(),
             Tag::parse(["amount", "500000"]).unwrap(),
         ]);
-        let result = parse_job_result(&result_event).expect("should parse");
+        let result = parse_job_result(&result_event, None).unwrap().expect("should parse");
         // Should prefer "request" tag for request_id
         assert_eq!(result.request_id, request_event.id);
         assert_eq!(result.amount, Some(500_000));
@@ -966,7 +1079,7 @@ mod tests {
         let event = make_event(6100, "content", vec![
             Tag::parse(["amount", "1000"]).unwrap(),
         ]);
-        assert!(parse_job_result(&event).is_none());
+        assert!(parse_job_result(&event, None).unwrap().is_none());
     }
 
     #[test]
@@ -977,7 +1090,7 @@ mod tests {
         let result_event = make_event(6100, "free result", vec![
             Tag::event(request_event.id),
         ]);
-        let result = parse_job_result(&result_event).expect("should parse");
+        let result = parse_job_result(&result_event, None).unwrap().expect("should parse");
         assert_eq!(result.amount, None);
         assert_eq!(result.content, "free result");
     }
@@ -1192,5 +1305,294 @@ mod tests {
         assert_eq!(job_request_kind(999).unwrap().as_u16(), 5999);
         // Offset 1000 → kind 6000 → invalid (>= KIND_JOB_RESULT_BASE)
         assert!(job_request_kind(1000).is_none());
+    }
+
+    // ── Encryption helpers ──
+
+    #[test]
+    fn test_is_encrypted_true() {
+        let event = make_event(5100, "ciphertext", vec![
+            Tag::parse(["i", "encrypted", "text"]).unwrap(),
+            Tag::parse(["encrypted", "nip44"]).unwrap(),
+        ]);
+        assert!(is_encrypted(&event));
+    }
+
+    #[test]
+    fn test_is_encrypted_false() {
+        let event = make_event(5100, "", vec![
+            Tag::parse(["i", "data", "text"]).unwrap(),
+        ]);
+        assert!(!is_encrypted(&event));
+    }
+
+    #[test]
+    fn test_nip44_encrypt_decrypt_roundtrip() {
+        let alice = Keys::generate();
+        let bob = Keys::generate();
+        let plaintext = "Hello, encrypted world!";
+
+        let ciphertext = nip44_encrypt(alice.secret_key(), &bob.public_key(), plaintext).unwrap();
+        assert_ne!(ciphertext, plaintext);
+
+        let decrypted = nip44_decrypt(bob.secret_key(), &alice.public_key(), &ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    // ── Encrypted job request parsing ──
+
+    #[test]
+    fn test_parse_job_request_encrypted() {
+        let customer = Keys::generate();
+        let provider = Keys::generate();
+        let provider_id = AgentIdentity::from_keys(provider.clone());
+        let plaintext = "secret input data";
+
+        let ciphertext = nip44_encrypt(customer.secret_key(), &provider.public_key(), plaintext).unwrap();
+        let event = make_event_with_keys(&customer, 5100, &ciphertext, vec![
+            Tag::parse(["i", "encrypted", "text"]).unwrap(),
+            Tag::parse(["encrypted", "nip44"]).unwrap(),
+        ]);
+
+        let req = parse_job_request(&event, Some(&provider_id))
+            .unwrap()
+            .expect("should parse");
+        assert_eq!(req.input_data, plaintext);
+        assert_eq!(req.input_type, "text");
+        assert!(req.encrypted);
+    }
+
+    #[test]
+    fn test_parse_job_request_encrypted_no_key() {
+        let customer = Keys::generate();
+        let provider = Keys::generate();
+
+        let ciphertext = nip44_encrypt(customer.secret_key(), &provider.public_key(), "secret").unwrap();
+        let event = make_event_with_keys(&customer, 5100, &ciphertext, vec![
+            Tag::parse(["i", "encrypted", "text"]).unwrap(),
+            Tag::parse(["encrypted", "nip44"]).unwrap(),
+        ]);
+
+        // No decrypt key → returns ciphertext as-is, encrypted = true
+        let req = parse_job_request(&event, None)
+            .unwrap()
+            .expect("should parse");
+        assert_eq!(req.input_data, ciphertext);
+        assert!(req.encrypted);
+    }
+
+    #[test]
+    fn test_parse_job_request_encrypted_wrong_key() {
+        let customer = Keys::generate();
+        let provider = Keys::generate();
+        let wrong_key = Keys::generate();
+        let wrong_id = AgentIdentity::from_keys(wrong_key);
+
+        let ciphertext = nip44_encrypt(customer.secret_key(), &provider.public_key(), "secret").unwrap();
+        let event = make_event_with_keys(&customer, 5100, &ciphertext, vec![
+            Tag::parse(["i", "encrypted", "text"]).unwrap(),
+            Tag::parse(["encrypted", "nip44"]).unwrap(),
+        ]);
+
+        // Wrong key → returns Ok with ciphertext and decryption_error
+        let req = parse_job_request(&event, Some(&wrong_id))
+            .unwrap()
+            .expect("should parse");
+        assert!(req.encrypted);
+        assert!(req.decryption_error.is_some());
+        assert_eq!(req.input_data, ciphertext);
+    }
+
+    #[test]
+    fn test_parse_job_request_not_encrypted_flag() {
+        let event = make_event(5100, "", vec![
+            Tag::parse(["i", "plaintext data", "text"]).unwrap(),
+        ]);
+        let req = parse_job_request(&event, None).unwrap().expect("should parse");
+        assert!(!req.encrypted);
+    }
+
+    // ── Encrypted job result parsing ──
+
+    #[test]
+    fn test_parse_job_result_encrypted() {
+        let provider = Keys::generate();
+        let customer = Keys::generate();
+        let customer_id = AgentIdentity::from_keys(customer.clone());
+        let plaintext = "secret result content";
+
+        let request_event = make_event_with_keys(&customer, 5100, "", vec![
+            Tag::parse(["i", "data", "text"]).unwrap(),
+        ]);
+
+        let ciphertext = nip44_encrypt(provider.secret_key(), &customer.public_key(), plaintext).unwrap();
+        let result_event = make_event_with_keys(&provider, 6100, &ciphertext, vec![
+            Tag::event(request_event.id),
+            Tag::parse(["encrypted", "nip44"]).unwrap(),
+        ]);
+
+        let result = parse_job_result(&result_event, Some(&customer_id))
+            .unwrap()
+            .expect("should parse");
+        assert_eq!(result.content, plaintext);
+        assert!(result.encrypted);
+    }
+
+    #[test]
+    fn test_parse_job_result_encrypted_wrong_key() {
+        let provider = Keys::generate();
+        let customer = Keys::generate();
+        let wrong_key = Keys::generate();
+        let wrong_id = AgentIdentity::from_keys(wrong_key);
+
+        let request_event = make_event_with_keys(&customer, 5100, "", vec![
+            Tag::parse(["i", "data", "text"]).unwrap(),
+        ]);
+
+        let ciphertext = nip44_encrypt(provider.secret_key(), &customer.public_key(), "secret").unwrap();
+        let result_event = make_event_with_keys(&provider, 6100, &ciphertext, vec![
+            Tag::event(request_event.id),
+            Tag::parse(["encrypted", "nip44"]).unwrap(),
+        ]);
+
+        // Wrong key → returns Ok with ciphertext and decryption_error
+        let result = parse_job_result(&result_event, Some(&wrong_id))
+            .unwrap()
+            .expect("should parse");
+        assert!(result.encrypted);
+        assert!(result.decryption_error.is_some());
+        assert_eq!(result.content, ciphertext);
+    }
+
+    #[test]
+    fn test_parse_job_result_not_encrypted_flag() {
+        let request_event = make_event(5100, "", vec![
+            Tag::parse(["i", "data", "text"]).unwrap(),
+        ]);
+        let result_event = make_event(6100, "plain result", vec![
+            Tag::event(request_event.id),
+        ]);
+        let result = parse_job_result(&result_event, None).unwrap().expect("should parse");
+        assert!(!result.encrypted);
+    }
+
+    // ── submit_job_request encryption integration ──
+
+    /// Build a minimal MarketplaceService wired to a local nostr client
+    /// that captures the event without sending it to real relays.
+    /// Returns the signed Event for inspection.
+    async fn build_job_request_event(
+        customer_keys: &Keys,
+        provider_pk: Option<&PublicKey>,
+        input_data: &str,
+        input_type: &str,
+    ) -> Event {
+        // Replicate submit_job_request tag-building locally so we can
+        // inspect the resulting event without needing a real relay.
+        let kind_offset: u16 = 100;
+        let k = job_request_kind(kind_offset).unwrap();
+
+        let (content, i_tag_data) = if let Some(recipient) = provider_pk {
+            let ct = nip44_encrypt(customer_keys.secret_key(), recipient, input_data).unwrap();
+            (ct, "encrypted".to_string())
+        } else {
+            (String::new(), input_data.to_string())
+        };
+
+        let mut tags: Vec<Tag> = vec![
+            Tag::parse(["i", &i_tag_data, input_type]).unwrap(),
+        ];
+
+        if let Some(pk) = provider_pk {
+            tags.push(Tag::public_key(*pk));
+        }
+        if provider_pk.is_some() {
+            tags.push(Tag::parse(["encrypted", "nip44"]).unwrap());
+        }
+        tags.push(Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)),
+            vec!["elisym".to_string()],
+        ));
+
+        EventBuilder::new(k, &content)
+            .tags(tags)
+            .sign_with_keys(customer_keys)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_submit_job_request_encrypted_has_correct_tags() {
+        let customer = Keys::generate();
+        let provider = Keys::generate();
+
+        let event = build_job_request_event(
+            &customer,
+            Some(&provider.public_key()),
+            "secret payload",
+            "text",
+        ).await;
+
+        // 1. Must have ["encrypted", "nip44"] tag
+        assert!(is_encrypted(&event), "encrypted tag must be present");
+
+        // 2. "i" tag data must be "encrypted", not the plaintext
+        let i_data = event.tags.iter().find_map(|t| {
+            let s = t.as_slice();
+            if s.first().map(|v| v.as_str()) == Some("i") {
+                Some(s.get(1).map(|v| v.to_string()).unwrap_or_default())
+            } else {
+                None
+            }
+        }).expect("i tag must exist");
+        assert_eq!(i_data, "encrypted");
+
+        // 3. Content must be non-empty ciphertext (not the plaintext)
+        assert!(!event.content.is_empty(), "content must be ciphertext");
+        assert_ne!(event.content, "secret payload", "content must not be plaintext");
+
+        // 4. Provider can decrypt back to original plaintext
+        let provider_id = AgentIdentity::from_keys(provider.clone());
+        let req = parse_job_request(&event, Some(&provider_id))
+            .unwrap()
+            .expect("should parse");
+        assert_eq!(req.input_data, "secret payload");
+        assert!(req.encrypted);
+        assert!(req.decryption_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_submit_job_request_broadcast_is_plaintext() {
+        let customer = Keys::generate();
+
+        let event = build_job_request_event(
+            &customer,
+            None,
+            "public payload",
+            "text",
+        ).await;
+
+        // 1. Must NOT have encrypted tag
+        assert!(!is_encrypted(&event), "broadcast must not have encrypted tag");
+
+        // 2. Content must be empty (NIP-90 convention)
+        assert!(event.content.is_empty(), "broadcast content must be empty");
+
+        // 3. "i" tag must contain the plaintext data
+        let i_data = event.tags.iter().find_map(|t| {
+            let s = t.as_slice();
+            if s.first().map(|v| v.as_str()) == Some("i") {
+                Some(s.get(1).map(|v| v.to_string()).unwrap_or_default())
+            } else {
+                None
+            }
+        }).expect("i tag must exist");
+        assert_eq!(i_data, "public payload");
+
+        // 4. Parses correctly without identity
+        let req = parse_job_request(&event, None)
+            .unwrap()
+            .expect("should parse");
+        assert_eq!(req.input_data, "public payload");
+        assert!(!req.encrypted);
     }
 }

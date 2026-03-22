@@ -33,6 +33,12 @@ impl AgentIdentity {
         Self::from_secret_key(nsec)
     }
 
+    /// Create identity from existing Keys (crate-internal, test-only).
+    #[cfg(test)]
+    pub(crate) fn from_keys(keys: Keys) -> Self {
+        Self { keys }
+    }
+
     /// Get the public key.
     pub fn public_key(&self) -> PublicKey {
         self.keys.public_key()
@@ -41,6 +47,11 @@ impl AgentIdentity {
     /// Get the npub bech32 representation.
     pub fn npub(&self) -> String {
         self.keys.public_key().to_bech32().unwrap_or_default()
+    }
+
+    /// Get a reference to the secret key (crate-internal only).
+    pub(crate) fn secret_key(&self) -> &SecretKey {
+        self.keys.secret_key()
     }
 
     /// Get a reference to the underlying Keys.

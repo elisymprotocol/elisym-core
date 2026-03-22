@@ -6,6 +6,7 @@ use crate::Subscription;
 use crate::dedup::{BoundedDedup, recv_notification, DEDUP_CAPACITY};
 use crate::error::Result;
 use crate::identity::AgentIdentity;
+use crate::types::{KIND_PING, KIND_PONG};
 
 /// A received private message.
 #[derive(Debug, Clone)]
@@ -103,6 +104,138 @@ impl MessagingService {
                 }
             }
             tracing::warn!("subscription task ended: messages (notification channel closed)");
+        });
+
+        Ok(Subscription::new(rx, handle))
+    }
+
+    // ── Ephemeral ping/pong (kind 20100/20101) ──
+
+    /// Send a ping to an agent. The event is ephemeral (not stored by relays).
+    pub async fn send_ping(
+        &self,
+        agent_pubkey: &PublicKey,
+        nonce: &str,
+    ) -> Result<()> {
+        let content = serde_json::json!({"nonce": nonce}).to_string();
+        let builder = EventBuilder::new(Kind::from(KIND_PING), &content)
+            .tag(Tag::public_key(*agent_pubkey));
+        self.client.send_event_builder(builder).await?;
+        Ok(())
+    }
+
+    /// Send a pong response to a ping sender.
+    pub async fn send_pong(
+        &self,
+        recipient_pubkey: &PublicKey,
+        nonce: &str,
+    ) -> Result<()> {
+        let content = serde_json::json!({"nonce": nonce}).to_string();
+        let builder = EventBuilder::new(Kind::from(KIND_PONG), &content)
+            .tag(Tag::public_key(*recipient_pubkey));
+        self.client.send_event_builder(builder).await?;
+        Ok(())
+    }
+
+    /// Ping an agent and wait for pong. Returns true if online.
+    pub async fn ping_agent(&self, agent_pubkey: &PublicKey, timeout_secs: u64) -> Result<bool> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nonce = format!(
+            "{:x}{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+
+        // Subscribe to pongs BEFORE sending ping
+        let filter = Filter::new()
+            .kind(Kind::from(KIND_PONG))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::P),
+                vec![self.identity.public_key().to_hex()],
+            )
+            .since(Timestamp::now());
+        let mut notifications = self.client.notifications();
+        let sub_output = self.client.subscribe(vec![filter], None).await?;
+
+        // Send ping
+        self.send_ping(agent_pubkey, &nonce).await?;
+
+        let my_pk_hex = self.identity.public_key().to_hex();
+        let timeout = tokio::time::Duration::from_secs(timeout_secs);
+        let result = tokio::time::timeout(timeout, async {
+            while let Some(notification) = recv_notification(&mut notifications).await {
+                if let RelayPoolNotification::Event { event, .. } = notification {
+                    if event.kind != Kind::from(KIND_PONG) { continue; }
+                    if event.pubkey != *agent_pubkey { continue; }
+                    let targeted = event.tags.iter().any(|t| {
+                        let s = t.as_slice();
+                        s.first().map(|v| v.as_str()) == Some("p")
+                            && s.get(1).map(|v| v.as_str()) == Some(my_pk_hex.as_str())
+                    });
+                    if !targeted { continue; }
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event.content) {
+                        if parsed.get("nonce").and_then(|v| v.as_str()) == Some(&nonce) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+
+        self.client.unsubscribe(sub_output.val).await;
+
+        Ok(result)
+    }
+
+    /// Subscribe to incoming ping events addressed to this agent.
+    /// Returns a subscription yielding `(sender_pubkey, nonce)` pairs.
+    pub async fn subscribe_to_pings(&self) -> Result<Subscription<(PublicKey, String)>> {
+        let (tx, rx) = mpsc::channel(256);
+
+        let filter = Filter::new()
+            .kind(Kind::from(KIND_PING))
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::P),
+                vec![self.identity.public_key().to_hex()],
+            )
+            .since(Timestamp::now());
+
+        let mut notifications = self.client.notifications();
+        self.client.subscribe(vec![filter], None).await?;
+
+        let my_pk_hex = self.identity.public_key().to_hex();
+        let handle = tokio::spawn(async move {
+            let mut seen = BoundedDedup::new(DEDUP_CAPACITY);
+            while let Some(notification) = recv_notification(&mut notifications).await {
+                if let RelayPoolNotification::Event { event, .. } = notification {
+                    if event.kind != Kind::from(KIND_PING) { continue; }
+                    if !seen.insert(event.id) { continue; }
+
+                    // Check "p" tag matches us
+                    let targeted = event.tags.iter().any(|t| {
+                        let s = t.as_slice();
+                        s.first().map(|v| v.as_str()) == Some("p")
+                            && s.get(1).map(|v| v.as_str()) == Some(my_pk_hex.as_str())
+                    });
+                    if !targeted { continue; }
+
+                    // Parse nonce from content
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event.content) {
+                        if let Some(nonce) = parsed.get("nonce").and_then(|v| v.as_str()) {
+                            if tx.send((event.pubkey, nonce.to_string())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         });
 
         Ok(Subscription::new(rx, handle))

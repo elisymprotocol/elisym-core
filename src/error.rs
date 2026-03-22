@@ -27,4 +27,7 @@ pub enum ElisymError {
 
     #[error("Configuration error: {0}")]
     Config(String),
+
+    #[error("Encryption error: {0}")]
+    Encryption(String),
 }

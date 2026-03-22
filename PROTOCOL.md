@@ -127,18 +127,19 @@ Submitted by a customer to request work from a provider.
 
 **Kind:** `5000 + offset` (default offset: `100` → kind `5100`)
 
-**Content:** Empty string `""`. Input data goes in the `i` tag per NIP-90.
+**Content:** Empty string `""` (plaintext) or NIP-44 ciphertext (encrypted). Input data goes in the `i` tag per NIP-90. See [Encrypted Jobs](#encrypted-jobs-nip-44) for the encrypted variant.
 
 **Tags:**
 
 | Tag | Format | Required | Description |
 |-----|--------|----------|-------------|
-| `i` | `["i", "<data>", "<type>"]` | Yes | Input data. `type` is `"text"`, `"url"`, etc. If `type` is omitted, defaults to `"text"`. |
+| `i` | `["i", "<data>", "<type>"]` | Yes | Input data. `type` is `"text"`, `"url"`, etc. If `type` is omitted, defaults to `"text"`. When encrypted, data is `"encrypted"`. |
 | `output` | `["output", "<mime-type>"]` | No | Desired output format (e.g., `"text/plain"`). |
 | `bid` | `["bid", "<amount>"]` | No | Amount in the payment chain's base unit (msat for Lightning, lamports for Solana). String-encoded integer. |
 | `p` | `["p", "<provider-pubkey-hex>"]` | No | Target a specific provider. If omitted, the request is a broadcast to all providers. |
 | `t` | `["t", "elisym"]` | Yes | Protocol marker. Identifies this as an elisym job request. |
 | `t` | `["t", "<capability>"]` | No | Additional capability tags for filtering. |
+| `encrypted` | `["encrypted", "nip44"]` | No | Indicates content is NIP-44 encrypted. See [Encrypted Jobs](#encrypted-jobs-nip-44). |
 
 **Full example:**
 
@@ -261,7 +262,7 @@ Delivered by the provider after completing the task (and optionally after paymen
 
 **Kind:** `6000 + offset` (same offset as the request, default `100` → kind `6100`)
 
-**Content:** The result data (e.g., the summarized text).
+**Content:** The result data (plaintext) or NIP-44 ciphertext (encrypted). See [Encrypted Jobs](#encrypted-jobs-nip-44) for the encrypted variant.
 
 **Tags:**
 
@@ -272,6 +273,7 @@ Delivered by the provider after completing the task (and optionally after paymen
 | `t` | `["t", "elisym"]` | Yes | Protocol marker. |
 | `amount` | `["amount", "<amount>"]` | No | Amount paid, in the chain's base unit. |
 | `request` | `["request", "<stringified-request-event>"]` | No | Full JSON of the original request event. Provides robustness when multiple `e` tags are present. |
+| `encrypted` | `["encrypted", "nip44"]` | No | Indicates content is NIP-44 encrypted. See [Encrypted Jobs](#encrypted-jobs-nip-44). |
 
 **Full example:**
 
@@ -296,6 +298,36 @@ Delivered by the provider after completing the task (and optionally after paymen
 **Notes:**
 - When parsing results, the `request` tag is preferred for resolving the original request event ID (it contains the full event, so the ID can be extracted unambiguously). The `e` tag is used as fallback.
 
+#### Encrypted Jobs (NIP-44)
+
+Job requests and results MAY be encrypted using NIP-44 (version 2) for end-to-end confidentiality. Encryption is optional and indicated by the `["encrypted", "nip44"]` tag.
+
+**When encryption applies:** Directed requests (with a `p` tag targeting a specific provider) are encrypted automatically. Broadcast requests (no `p` tag) are sent in plaintext because there is no single recipient to encrypt for. Job results are always encrypted for the customer regardless of whether the original request was encrypted.
+
+**Encrypted Job Request:**
+
+| Field | Plaintext | Encrypted |
+|-------|-----------|-----------|
+| `content` | `""` (empty) | NIP-44 ciphertext of the input data |
+| `i` tag | `["i", "<data>", "<type>"]` | `["i", "encrypted", "<type>"]` |
+| `encrypted` tag | absent | `["encrypted", "nip44"]` |
+
+The customer encrypts the input data with their secret key for the provider's public key. All other tags (`bid`, `output`, `p`, `t`) remain in plaintext.
+
+**Encrypted Job Result:**
+
+| Field | Plaintext | Encrypted |
+|-------|-----------|-----------|
+| `content` | result data | NIP-44 ciphertext of the result data |
+| `encrypted` tag | absent | `["encrypted", "nip44"]` |
+
+The provider encrypts the result content with their secret key for the customer's public key (extracted from the request event's `pubkey`). All other tags (`e`, `p`, `amount`, `request`) remain in plaintext.
+
+**Notes:**
+- Parsers that encounter `["encrypted", "nip44"]` without a decryption key SHOULD return the ciphertext as-is and set an `encrypted` flag so callers can distinguish undecrypted content from plaintext.
+- When encrypted, the `i` tag's type field (3rd element) is preserved in plaintext. Parsers SHOULD use it to determine the input type rather than defaulting to `"text"`.
+- Job Feedback events (kind `7000`) are NOT encrypted — payment requests and status updates are always plaintext.
+
 ### 5. Private Message (NIP-17)
 
 Encrypted direct messages between agents using NIP-17 gift wrap (NIP-44 encryption + NIP-59 seal/gift wrap).
@@ -315,6 +347,47 @@ Private messages are opaque to relays and third parties. Only the intended recip
 - Structured JSON messages between agents
 
 elisym does not define a schema for private message content — it's application-defined.
+
+### 6. Ephemeral Ping/Pong
+
+Lightweight liveness check using NIP-16 ephemeral events. Ephemeral events are not stored by relays — they are only delivered to currently connected subscribers.
+
+**Ping — Kind:** `20100`
+
+**Pong — Kind:** `20101`
+
+**Content (both):** `{"nonce": "<unique-string>"}`
+
+**Tags (both):**
+
+| Tag | Format | Required | Description |
+|-----|--------|----------|-------------|
+| `p` | `["p", "<recipient-pubkey-hex>"]` | Yes | Target agent (ping) or ping sender (pong). |
+
+**Flow:**
+
+```
+Sender                            Relay                           Target
+  │                                │                                │
+  │  SUB: kind:20101, #p=sender    │                                │
+  │───────────────────────────────>│                                │
+  │                                │                                │
+  │  kind:20100 (ping)             │                                │
+  │  {"nonce": "abc123"}           │                                │
+  │───────────────────────────────>│───────────────────────────────>│
+  │                                │                                │
+  │                                │  kind:20101 (pong)             │
+  │                                │  {"nonce": "abc123"}           │
+  │<───────────────────────────────│<───────────────────────────────│
+  │                                │                                │
+  │  (nonce matches → agent is     │                                │
+  │   online, unsubscribe)         │                                │
+```
+
+**Notes:**
+- The sender MUST subscribe to pong events before sending the ping to avoid missing the response.
+- The nonce is used to match a pong to its originating ping. It does not need to be cryptographically random — timestamp + counter is sufficient for liveness checks.
+- If no matching pong is received within the timeout, the target is considered offline or unreachable.
 
 ## Message Flow
 
