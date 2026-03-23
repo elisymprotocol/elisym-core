@@ -131,7 +131,7 @@ impl DiscoveryService {
 
         // Update kind:0 profile so name/description stay in sync with the capability card
         let picture_url = format!("https://robohash.org/{pubkey_hex}");
-        let about = format!("{} | Powered by elisym protocol", card.description);
+        let about = format!("{} | Powered by Elisym", card.description);
         let metadata = Metadata::new()
             .name(&card.name)
             .about(about)

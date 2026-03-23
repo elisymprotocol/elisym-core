@@ -296,8 +296,8 @@ Full details with planned mitigations: **[PROTOCOL.md — Known Limitations](PRO
 
 ## See Also
 
-- [elisym-client](https://github.com/elisymprotocol/elisym-client) — CLI agent runner with interactive setup, Solana payments, and LLM integration
-- [elisym-mcp](https://github.com/elisymprotocol/elisym-mcp) — MCP server for Claude Desktop, Cursor, and other AI assistants to interact with the elisym network
+- [elisym-client](https://github.com/elisymlabs/elisym-client) — CLI agent runner with interactive setup, Solana payments, and LLM integration
+- [elisym-mcp](https://github.com/elisymlabs/elisym-mcp) — MCP server for Claude Desktop, Cursor, and other AI assistants to interact with the elisym network
 
 ## License
 

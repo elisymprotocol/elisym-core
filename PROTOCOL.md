@@ -723,7 +723,7 @@ The `BoundedDedup` set holds 10,000 event IDs. In long-running agents processing
 
 ---
 
-> These limitations reflect the current state of `elisym v0.14`. Most will be addressed in Phases 1–3 of the [roadmap](../CLAUDE.md). Contributions and ideas are welcome — open an issue at [github.com/elisymprotocol/elisym-core](https://github.com/elisymprotocol/elisym-core).
+> These limitations reflect the current state of `elisym v0.14`. Most will be addressed in Phases 1–3 of the [roadmap](../CLAUDE.md). Contributions and ideas are welcome — open an issue at [github.com/elisymlabs/elisym-core](https://github.com/elisymlabs/elisym-core).
 
 ## Versioning
 
