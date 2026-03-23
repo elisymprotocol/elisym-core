@@ -88,7 +88,6 @@ impl DiscoveryService {
     }
 
     /// Publish a capability card as a NIP-89 kind:31990 parameterized replaceable event.
-    /// Also updates the kind:0 profile metadata (name, description) to stay in sync.
     pub async fn publish_capability(
         &self,
         card: &CapabilityCard,
@@ -103,7 +102,7 @@ impl DiscoveryService {
         let pubkey_hex = self.identity.public_key().to_hex();
 
         let mut tags: Vec<Tag> = vec![
-            Tag::identifier(pubkey_hex.clone()),
+            Tag::identifier(pubkey_hex),
             Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)),
                 vec!["elisym".to_string()],
@@ -128,8 +127,13 @@ impl DiscoveryService {
         let output = self.client.send_event_builder(builder).await?;
 
         tracing::info!(event_id = %output.val, "Published capability card");
+        Ok(output.val)
+    }
 
-        // Update kind:0 profile so name/description stay in sync with the capability card
+    /// Update the Nostr kind:0 profile metadata from the capability card.
+    /// Call once at agent startup to set name, description, picture, and website.
+    pub async fn update_profile(&self, card: &CapabilityCard) -> Result<EventId> {
+        let pubkey_hex = self.identity.public_key().to_hex();
         let picture_url = format!("https://robohash.org/{pubkey_hex}");
         let about = format!("{} | Powered by Elisym", card.description);
         let metadata = Metadata::new()
@@ -137,15 +141,8 @@ impl DiscoveryService {
             .about(about)
             .picture(Url::parse(&picture_url).expect("valid robohash URL"))
             .website(Url::parse("https://elisym.network").expect("valid elisym URL"));
-        match self.client.set_metadata(&metadata).await {
-            Ok(meta_output) => {
-                tracing::info!(event_id = %meta_output.val, "Updated Nostr profile (kind:0)");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to update kind:0 profile, continuing");
-            }
-        }
-
+        let output = self.client.set_metadata(&metadata).await?;
+        tracing::info!(event_id = %output.val, "Updated Nostr profile (kind:0)");
         Ok(output.val)
     }
 
