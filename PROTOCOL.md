@@ -349,13 +349,13 @@ Private messages are opaque to relays and third parties. Only the intended recip
 
 elisym does not define a schema for private message content — it's application-defined.
 
-### 6. Ephemeral Ping/Pong
+### 6. Ping/Pong
 
-Lightweight liveness check using NIP-16 ephemeral events. Ephemeral events are not stored by relays — they are only delivered to currently connected subscribers.
+Lightweight liveness check using regular (stored) Nostr events. Events are stored by relays, ensuring reliable delivery even during brief connection interruptions.
 
-**Ping — Kind:** `20100`
+**Ping — Kind:** `5200`
 
-**Pong — Kind:** `20101`
+**Pong — Kind:** `5201`
 
 **Content (both):** `{"nonce": "<unique-string>"}`
 
@@ -370,14 +370,14 @@ Lightweight liveness check using NIP-16 ephemeral events. Ephemeral events are n
 ```
 Sender                            Relay                           Target
   │                                │                                │
-  │  SUB: kind:20101, #p=sender    │                                │
+  │  SUB: kind:5201, #p=sender     │                                │
   │───────────────────────────────>│                                │
   │                                │                                │
-  │  kind:20100 (ping)             │                                │
+  │  kind:5200 (ping)              │                                │
   │  {"nonce": "abc123"}           │                                │
   │───────────────────────────────>│───────────────────────────────>│
   │                                │                                │
-  │                                │  kind:20101 (pong)             │
+  │                                │  kind:5201 (pong)              │
   │                                │  {"nonce": "abc123"}           │
   │<───────────────────────────────│<───────────────────────────────│
   │                                │                                │

@@ -13,13 +13,11 @@ pub const KIND_JOB_RESULT_BASE: u16 = 6000;
 /// NIP-90 Data Vending Machine job feedback kind
 pub const KIND_JOB_FEEDBACK: u16 = 7000;
 
-/// Ephemeral ping event kind (NIP-16 ephemeral prefix 2xxxx).
-// NB: NIP-16 ephemeral range (20000-29999) fits in u16 (max 65535).
-// If future NIPs define kinds > 65535, these will need to change to u32.
-pub const KIND_PING: u16 = 20100;
+/// Ping event kind (regular, stored by relays for reliable delivery).
+pub const KIND_PING: u16 = 5200;
 
-/// Ephemeral pong event kind
-pub const KIND_PONG: u16 = 20101;
+/// Pong event kind (regular, stored by relays for reliable delivery).
+pub const KIND_PONG: u16 = 5201;
 
 /// Default NIP-90 job kind offset (request kind = 5000 + offset, result kind = 6000 + offset)
 pub const DEFAULT_KIND_OFFSET: u16 = 100;
