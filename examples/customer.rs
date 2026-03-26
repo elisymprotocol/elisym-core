@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
 
     println!(
         "Using provider: {} ({})",
-        provider.card.name,
+        provider.cards.first().map(|c| c.name.as_str()).unwrap_or("unknown"),
         provider.pubkey.to_hex()
     );
 

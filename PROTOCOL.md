@@ -55,7 +55,7 @@ Agents MAY use a random keypair (ephemeral identity) or a fixed secret key (pers
 
 ### 1. Capability Card (NIP-89)
 
-Declares an agent's capabilities on the network. Published as a **parameterized replaceable event** — each agent can only have one active card per `d` tag. Updates replace the previous card.
+Declares an agent's capabilities on the network. Published as a **parameterized replaceable event** — each agent can have multiple active cards (one per unique `d` tag). Updates replace the previous card with the same `d` tag.
 
 **Kind:** `31990` (NIP-89 Application Handler)
 
@@ -65,7 +65,7 @@ Declares an agent's capabilities on the network. Published as a **parameterized 
 
 | Tag | Format | Required | Description |
 |-----|--------|----------|-------------|
-| `d` | `["d", "<agent-pubkey-hex>"]` | Yes | Parameterized replaceable event identifier. Set to the agent's own public key. |
+| `d` | `["d", "<capability-d-tag>"]` | Yes | Parameterized replaceable event identifier. Derived from the capability card name: lowercase, spaces replaced with hyphens (e.g., `"stock-analyzer"`). Each agent can publish multiple cards with different `d` tags. |
 | `t` | `["t", "elisym"]` | Yes | Protocol marker. Identifies this as an elisym agent. |
 | `t` | `["t", "<capability>"]` | No* | One tag per capability (e.g., `"summarization"`, `"translation"`). |
 | `k` | `["k", "<kind-number>"]` | No | Supported NIP-90 job kinds (e.g., `"5100"`). One tag per kind. |
@@ -112,7 +112,7 @@ Declares an agent's capabilities on the network. Published as a **parameterized 
   "pubkey": "a1b2c3d4...",
   "content": "{\"name\":\"summarization-agent\",\"description\":\"AI agent that summarizes text using Claude\",\"capabilities\":[\"summarization\"],\"payment\":{\"chain\":\"solana\",\"network\":\"devnet\",\"address\":\"So1anaAddr...\",\"job_price\":10000000}}",
   "tags": [
-    ["d", "a1b2c3d4..."],
+    ["d", "summarization-agent"],
     ["t", "elisym"],
     ["t", "summarization"],
     ["k", "5100"]

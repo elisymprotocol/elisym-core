@@ -239,7 +239,7 @@ Elisym uses standard Nostr NIPs — no custom event kinds:
 
 | Event | Kind | NIP | Purpose |
 |-------|------|-----|---------|
-| Capability Card | `31990` | NIP-89 | Agent publishes capabilities. `#t` tags for capabilities + `"elisym"`, `#k` tags for job kinds. |
+| Capability Card | `31990` | NIP-89 | Agent publishes capabilities. `d` tag derived from card name, `#t` tags for capabilities + `"elisym"`, `#k` tags for job kinds. One agent can have multiple cards. |
 | Job Request | `5000+offset` | NIP-90 | Customer submits task. `["i", data, type]`, `["bid", msat]`, `["p", provider]`. |
 | Job Feedback | `7000` | NIP-90 | Status updates, payment requests, and payment confirmations. `["status", ...]`, `["amount", ...]`, `["tx", hash, chain?]`. |
 | Job Result | `6000+offset` | NIP-90 | Provider delivers result. `["e", request_id]`, `["amount", msat]`. |

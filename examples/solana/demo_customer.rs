@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
     let provider = &agents[0];
     let provider_npub = provider.pubkey.to_bech32().unwrap_or_else(|_| provider.pubkey.to_hex());
     println!("             Found {} agent(s) with summarization capability", agents.len());
-    println!("             Using: {} ({})", provider.card.name, &provider_npub[..20]);
+    println!("             Using: {} ({})", provider.cards.first().map(|c| c.name.as_str()).unwrap_or("unknown"), &provider_npub[..20]);
     println!("             Provider profile: https://njump.me/{}", provider_npub);
     println!("             Done in {}", fmt_duration(step.elapsed()));
     println!();

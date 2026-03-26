@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::Entry;
 use std::time::Duration;
 
 use nostr_sdk::prelude::*;
@@ -8,11 +9,19 @@ use crate::error::Result;
 use crate::identity::{AgentIdentity, CapabilityCard};
 use crate::types::{kind, KIND_APP_HANDLER};
 
-/// A discovered agent with its capability card and event metadata.
+/// Convert a capability name to its Nostr d-tag form (lowercase, spaces → hyphens).
+pub fn to_d_tag(name: &str) -> String {
+    name.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// A discovered agent with its capability cards and event metadata.
 #[derive(Debug, Clone)]
 pub struct DiscoveredAgent {
     pub pubkey: PublicKey,
-    pub card: CapabilityCard,
+    pub cards: Vec<CapabilityCard>,
     pub event_id: EventId,
     pub supported_kinds: Vec<u16>,
     /// Number of requested capabilities that matched (for relevance sorting).
@@ -99,10 +108,10 @@ impl DiscoveryService {
             ));
         }
         let content = card.to_json()?;
-        let pubkey_hex = self.identity.public_key().to_hex();
+        let d_tag = to_d_tag(&card.name);
 
         let mut tags: Vec<Tag> = vec![
-            Tag::identifier(pubkey_hex),
+            Tag::identifier(d_tag),
             Tag::custom(
                 TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::T)),
                 vec!["elisym".to_string()],
@@ -183,24 +192,56 @@ impl DiscoveryService {
             .fetch_events(vec![f], Some(Duration::from_secs(10)))
             .await?;
 
-        let mut agents = Vec::new();
-        let mut seen_pubkeys = HashSet::new();
+        // Dedup by (pubkey, d-tag) — same card may arrive from multiple relays.
+        // Keep only the newest event per (pubkey, d-tag) pair.
+        let mut latest_by_key: HashMap<(PublicKey, String), Event> = HashMap::new();
         for event in events {
-            // Dedup by pubkey — same agent's card may arrive from multiple relays
-            if !seen_pubkeys.insert(event.pubkey) {
-                continue;
+            let d_tag = event
+                .tags
+                .iter()
+                .find_map(|t| {
+                    let s = t.as_slice();
+                    if s.first().map(|v| v.as_str()) == Some("d") {
+                        s.get(1).map(|v| v.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            let key = (event.pubkey, d_tag);
+            match latest_by_key.entry(key) {
+                Entry::Vacant(e) => { e.insert(event); }
+                Entry::Occupied(mut e) => {
+                    if event.created_at > e.get().created_at {
+                        e.insert(event);
+                    }
+                }
             }
+        }
+
+        // Group parsed cards and tags by pubkey, then compute match_count once
+        // over the union of all capability tags per agent.
+        struct AgentAccum {
+            cards: Vec<(CapabilityCard, Timestamp)>,
+            all_tags: HashSet<String>,
+            supported_kinds: Vec<u16>,
+            event_id: EventId,
+            latest_created_at: Timestamp,
+        }
+
+        let mut agent_map: HashMap<PublicKey, AgentAccum> = HashMap::new();
+
+        for event in latest_by_key.into_values() {
             match CapabilityCard::from_json(&event.content) {
                 Ok(card) => {
-                    // Single pass: collect "t" tags into a set and "k" tags into kinds
-                    let mut event_tags: HashSet<&str> = HashSet::new();
+                    let mut event_tags = Vec::new();
                     let mut supported_kinds: Vec<u16> = Vec::new();
                     for tag in event.tags.iter() {
                         let s = tag.as_slice();
                         match s.first().map(|v| v.as_str()) {
                             Some("t") => {
                                 if let Some(v) = s.get(1) {
-                                    event_tags.insert(v.as_str());
+                                    event_tags.push(v.to_string());
                                 }
                             }
                             Some("k") => {
@@ -212,37 +253,32 @@ impl DiscoveryService {
                         }
                     }
 
-                    // Post-filter: count how many requested capabilities match (OR with ranking).
-                    // Agents matching at least 1 capability are included; more matches = higher rank.
-                    let match_count = if filter.capabilities.is_empty() {
-                        0
-                    } else {
-                        let count = filter
-                            .capabilities
-                            .iter()
-                            .filter(|cap| matches_capability(cap, &event_tags))
-                            .count();
-
-                        if count == 0 {
-                            continue;
+                    let created_at = event.created_at;
+                    match agent_map.entry(event.pubkey) {
+                        Entry::Occupied(mut e) => {
+                            let acc = e.get_mut();
+                            acc.cards.push((card, created_at));
+                            acc.all_tags.extend(event_tags);
+                            for k in supported_kinds {
+                                if !acc.supported_kinds.contains(&k) {
+                                    acc.supported_kinds.push(k);
+                                }
+                            }
+                            if created_at > acc.latest_created_at {
+                                acc.event_id = event.id;
+                                acc.latest_created_at = created_at;
+                            }
                         }
-                        count
-                    };
-
-                    // Post-filter: free-text query against name and description.
-                    if let Some(ref query) = filter.query {
-                        if !matches_query(query, &card) {
-                            continue;
+                        Entry::Vacant(e) => {
+                            e.insert(AgentAccum {
+                                cards: vec![(card, created_at)],
+                                all_tags: event_tags.into_iter().collect(),
+                                supported_kinds,
+                                event_id: event.id,
+                                latest_created_at: created_at,
+                            });
                         }
                     }
-
-                    agents.push(DiscoveredAgent {
-                        pubkey: event.pubkey,
-                        card,
-                        event_id: event.id,
-                        supported_kinds,
-                        match_count,
-                    });
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -254,7 +290,44 @@ impl DiscoveryService {
             }
         }
 
-        // Sort by relevance: more capability matches first
+        // Compute match_count once per agent over the union of all their tags.
+        // Apply query filter per-agent (matches if ANY card matches).
+        let mut agents: Vec<DiscoveredAgent> = Vec::new();
+        for (pubkey, mut acc) in agent_map {
+            // Post-filter: free-text query against any of the agent's cards.
+            if let Some(ref query) = filter.query {
+                if !acc.cards.iter().any(|(card, _)| matches_query(query, card)) {
+                    continue;
+                }
+            }
+            let match_count = if filter.capabilities.is_empty() {
+                0
+            } else {
+                let tag_refs: HashSet<&str> = acc.all_tags.iter().map(|s| s.as_str()).collect();
+                let count = filter
+                    .capabilities
+                    .iter()
+                    .filter(|cap| matches_capability(cap, &tag_refs))
+                    .count();
+                if count == 0 {
+                    continue;
+                }
+                count
+            };
+
+            // Sort cards by created_at descending (newest first) for deterministic order.
+            acc.cards.sort_by(|a, b| b.1.cmp(&a.1));
+            let cards = acc.cards.into_iter().map(|(card, _)| card).collect();
+
+            agents.push(DiscoveredAgent {
+                pubkey,
+                cards,
+                event_id: acc.event_id,
+                supported_kinds: acc.supported_kinds,
+                match_count,
+            });
+        }
+
         if !filter.capabilities.is_empty() {
             agents.sort_by(|a, b| b.match_count.cmp(&a.match_count));
         }
@@ -270,6 +343,33 @@ impl DiscoveryService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── to_d_tag ──
+
+    #[test]
+    fn test_d_tag_basic() {
+        assert_eq!(to_d_tag("My Agent"), "my-agent");
+    }
+
+    #[test]
+    fn test_d_tag_multiple_spaces() {
+        assert_eq!(to_d_tag("Stock  Price   Analyzer"), "stock-price-analyzer");
+    }
+
+    #[test]
+    fn test_d_tag_already_lowercase() {
+        assert_eq!(to_d_tag("summarizer"), "summarizer");
+    }
+
+    #[test]
+    fn test_d_tag_leading_trailing_spaces() {
+        assert_eq!(to_d_tag("  hello world  "), "hello-world");
+    }
+
+    #[test]
+    fn test_d_tag_empty() {
+        assert_eq!(to_d_tag(""), "");
+    }
 
     // ── matches_capability ──
 
