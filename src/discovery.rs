@@ -221,10 +221,15 @@ impl DiscoveryService {
 
         // Group parsed cards and tags by pubkey, then compute match_count once
         // over the union of all capability tags per agent.
+        struct CardEntry {
+            card: CapabilityCard,
+            created_at: Timestamp,
+            tags: Vec<String>,
+            kinds: Vec<u16>,
+        }
+
         struct AgentAccum {
-            cards: Vec<(CapabilityCard, Timestamp)>,
-            all_tags: HashSet<String>,
-            supported_kinds: Vec<u16>,
+            entries: Vec<CardEntry>,
             event_id: EventId,
             latest_created_at: Timestamp,
         }
@@ -254,15 +259,23 @@ impl DiscoveryService {
                     }
 
                     let created_at = event.created_at;
+                    let entry = CardEntry {
+                        card,
+                        created_at,
+                        tags: event_tags,
+                        kinds: supported_kinds,
+                    };
+
                     match agent_map.entry(event.pubkey) {
                         Entry::Occupied(mut e) => {
                             let acc = e.get_mut();
-                            acc.cards.push((card, created_at));
-                            acc.all_tags.extend(event_tags);
-                            for k in supported_kinds {
-                                if !acc.supported_kinds.contains(&k) {
-                                    acc.supported_kinds.push(k);
+                            // Deduplicate by card name — keep the newer version
+                            if let Some(pos) = acc.entries.iter().position(|e| e.card.name == entry.card.name) {
+                                if created_at > acc.entries[pos].created_at {
+                                    acc.entries[pos] = entry;
                                 }
+                            } else {
+                                acc.entries.push(entry);
                             }
                             if created_at > acc.latest_created_at {
                                 acc.event_id = event.id;
@@ -271,9 +284,7 @@ impl DiscoveryService {
                         }
                         Entry::Vacant(e) => {
                             e.insert(AgentAccum {
-                                cards: vec![(card, created_at)],
-                                all_tags: event_tags.into_iter().collect(),
-                                supported_kinds,
+                                entries: vec![entry],
                                 event_id: event.id,
                                 latest_created_at: created_at,
                             });
@@ -290,20 +301,32 @@ impl DiscoveryService {
             }
         }
 
-        // Compute match_count once per agent over the union of all their tags.
-        // Apply query filter per-agent (matches if ANY card matches).
+        // Recompute all_tags and supported_kinds from surviving card entries,
+        // then apply filters per-agent.
         let mut agents: Vec<DiscoveredAgent> = Vec::new();
         for (pubkey, mut acc) in agent_map {
             // Post-filter: free-text query against any of the agent's cards.
             if let Some(ref query) = filter.query {
-                if !acc.cards.iter().any(|(card, _)| matches_query(query, card)) {
+                if !acc.entries.iter().any(|e| matches_query(query, &e.card)) {
                     continue;
                 }
             }
+
+            // Collect tags and kinds only from the final (deduplicated) entries.
+            let all_tags: HashSet<String> = acc.entries.iter().flat_map(|e| e.tags.iter().cloned()).collect();
+            let mut supported_kinds: Vec<u16> = Vec::new();
+            for e in &acc.entries {
+                for &k in &e.kinds {
+                    if !supported_kinds.contains(&k) {
+                        supported_kinds.push(k);
+                    }
+                }
+            }
+
             let match_count = if filter.capabilities.is_empty() {
                 0
             } else {
-                let tag_refs: HashSet<&str> = acc.all_tags.iter().map(|s| s.as_str()).collect();
+                let tag_refs: HashSet<&str> = all_tags.iter().map(|s| s.as_str()).collect();
                 let count = filter
                     .capabilities
                     .iter()
@@ -316,14 +339,14 @@ impl DiscoveryService {
             };
 
             // Sort cards by created_at descending (newest first) for deterministic order.
-            acc.cards.sort_by(|a, b| b.1.cmp(&a.1));
-            let cards = acc.cards.into_iter().map(|(card, _)| card).collect();
+            acc.entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            let cards = acc.entries.into_iter().map(|e| e.card).collect();
 
             agents.push(DiscoveredAgent {
                 pubkey,
                 cards,
                 event_id: acc.event_id,
-                supported_kinds: acc.supported_kinds,
+                supported_kinds,
                 match_count,
             });
         }
