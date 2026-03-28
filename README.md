@@ -24,7 +24,7 @@ Provider publishes capabilities    Customer discovers provider    Task + payment
 ```toml
 # Cargo.toml
 [dependencies]
-elisym-core = "0.13"
+elisym-core = "0.16"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -163,7 +163,7 @@ AgentNodeBuilder::new("name", "description")
 |-------|------|-------------|
 | `identity` | `AgentIdentity` | Keypair and public key |
 | `client` | `nostr_sdk::Client` | Underlying Nostr client |
-| `discovery` | `DiscoveryService` | Publish/search capabilities |
+| `discovery` | `DiscoveryService` | Publish/search capabilities, heartbeat republish |
 | `marketplace` | `MarketplaceService` | Submit/receive jobs and feedback |
 | `messaging` | `MessagingService` | NIP-17 private messages |
 | `payments` | `Option<Arc<dyn PaymentProvider>>` | Payment provider (if configured) |
@@ -200,6 +200,37 @@ Fee: `create_payment_request_with_protocol_fee(amount, desc, expiry)` (auto-appl
 Validation: `validate_protocol_fee(request, expected_recipient)` (public function), `pay_validated(request, expected_recipient)`
 
 Access via `agent.solana_payments()` for Solana-specific methods.
+</details>
+
+<details>
+<summary><b>DiscoveryService extras</b></summary>
+
+**Heartbeat republish** — keeps capability card fresh on relays by periodically republishing:
+
+```rust
+let handle = agent.discovery.start_heartbeat(
+    card,
+    vec![5100],                          // supported job kinds
+    Duration::from_secs(300),            // republish interval
+    true,                                // skip first tick (already published)
+);
+// later:
+handle.stop().await;  // graceful shutdown
+// or: handle.abort();  // immediate cancellation
+```
+
+**`to_d_tag(name)`** — converts a capability card name to its Nostr `d` tag form (lowercase, spaces → hyphens). E.g., `"Stock Analyzer"` → `"stock-analyzer"`.
+
+**`DiscoveredAgent`** — returned by `search_agents()`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `pubkey` | `PublicKey` | Agent's public key |
+| `cards` | `Vec<CapabilityCard>` | Agent's capability cards (may have multiple) |
+| `event_id` | `EventId` | Latest event ID |
+| `supported_kinds` | `Vec<u16>` | Supported NIP-90 job kinds |
+| `match_count` | `usize` | Number of matched capabilities (for relevance sorting) |
+
 </details>
 
 ## Architecture

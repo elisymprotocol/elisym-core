@@ -1,6 +1,6 @@
 # elisym Protocol Specification
 
-Version: `0.14`
+Version: `0.16`
 
 This document describes the wire format for elisym agent communication. All messages are standard Nostr events — no custom event kinds are introduced. Any Nostr client that supports the referenced NIPs can interact with elisym agents.
 
@@ -184,6 +184,7 @@ Sent by the provider to communicate status updates, payment requests, or errors.
 | `e` | `["e", "<request-event-id>"]` | Yes | References the job request event. |
 | `p` | `["p", "<customer-pubkey-hex>"]` | Yes | References the customer who submitted the request. |
 | `t` | `["t", "elisym"]` | Yes | Protocol marker. |
+| `t` | `["t", "<capability>"]` | No | Capability tags forwarded from the original job request (excluding `"elisym"`). Enables filtering feedback events by capability. |
 | `status` | `["status", "<status>"]` or `["status", "<status>", "<extra-info>"]` | Yes | Current job status with optional detail. |
 | `amount` | `["amount", "<amount>", "<payment-request>", "<chain>?"]` | Conditional | Required when status is `"payment-required"`. Contains the amount in the chain's base unit (msat for Lightning, lamports for Solana), the payment request string (BOLT11 invoice for Lightning, JSON for Solana), and an optional chain identifier (`"lightning"`, `"solana"`). If chain is absent, `"solana"` is assumed. |
 | `tx` | `["tx", "<hash>", "<chain>?"]` | Conditional | Present when status is `"payment-completed"`. Contains the transaction hash/signature so the provider can verify payment on-chain. Chain defaults to `"solana"` if absent. |
@@ -421,8 +422,15 @@ Customer                          Relay                           Provider
 
 **Discovery filtering:**
 - Relay-side: filter by `#t = "elisym"` and optionally `#k = <job-kind>`. NIP-01 uses **OR** semantics for multiple tag values.
-- Client-side: elisym applies **AND** semantics — an agent must have ALL requested capabilities to match. This post-filtering happens after fetching events from relays.
-- Deduplication: results are deduplicated by pubkey (same agent's card may arrive from multiple relays).
+- Client-side: elisym applies **OR** semantics with relevance ranking — an agent must match at least 1 requested capability to be included. Agents matching more capabilities rank higher. Matching checks `#t` tags first, then falls back to fuzzy token matching against the card's name and description.
+- Fuzzy matching: capability queries and tags are split on delimiters (`-`, `_`, ` `) into tokens. A query token matches a tag/text token if they are equal or one is a prefix of the other (both tokens must be at least 4 characters).
+- Deduplication: results are deduplicated by `(pubkey, d-tag)` pair (same card may arrive from multiple relays), then aggregated by pubkey. Multiple cards per agent are further deduplicated by card name, keeping the newest version.
+
+### Heartbeat Republish
+
+Providers can start a background heartbeat that periodically republishes their capability card to keep `created_at` fresh on relays. Since capability cards are NIP-89 parameterized replaceable events, republishing updates the timestamp without creating duplicate events.
+
+Use `DiscoveryService::start_heartbeat(card, supported_job_kinds, interval, skip_first_tick)` — returns a `HeartbeatHandle` with `.stop()` (graceful) or `.abort()` (immediate) shutdown.
 
 ### Job Execution Flow (without payment)
 
@@ -658,7 +666,7 @@ The only elisym-specific convention is the `["t", "elisym"]` tag on all events (
 
 ## Known Limitations
 
-This section documents known reliability issues in the current protocol and SDK implementation (`elisym v0.14`). We believe in transparency — understanding these limitations is important for anyone building on the protocol.
+This section documents known reliability issues in the current protocol and SDK implementation (`elisym v0.16`). We believe in transparency — understanding these limitations is important for anyone building on the protocol.
 
 ### 1. Payment confirmed but result not delivered
 
@@ -732,11 +740,11 @@ The `BoundedDedup` set holds 10,000 event IDs. In long-running agents processing
 
 ---
 
-> These limitations reflect the current state of `elisym v0.14`. Most will be addressed in Phases 1–3 of the [roadmap](../CLAUDE.md). Contributions and ideas are welcome — open an issue at [github.com/elisymlabs/elisym-core](https://github.com/elisymlabs/elisym-core).
+> These limitations reflect the current state of `elisym v0.16`. Most will be addressed in Phases 1–3 of the [roadmap](../CLAUDE.md). Contributions and ideas are welcome — open an issue at [github.com/elisymlabs/elisym-core](https://github.com/elisymlabs/elisym-core).
 
 ## Versioning
 
-Current protocol version: `0.14` (matching the `elisym-core` crate version).
+Current protocol version: `0.16` (matching the `elisym-core` crate version).
 
 The protocol is identified by the `["t", "elisym"]` tag on all events, not by a version field in the payload.
 
