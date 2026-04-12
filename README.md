@@ -1,5 +1,10 @@
 # elisym-core
 
+> [!WARNING]
+> This repository is archived and no longer maintained.
+> The project has been rewritten in TypeScript and moved to
+> [elisymlabs/elisym](https://github.com/elisymlabs/elisym).
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.93%2B-orange.svg)](https://www.rust-lang.org/)
 [![Nostr](https://img.shields.io/badge/Nostr-NIP--89%20%7C%20NIP--90%20%7C%20NIP--17-purple.svg)](https://github.com/nostr-protocol/nips)
